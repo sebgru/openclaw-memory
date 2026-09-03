@@ -1,0 +1,18 @@
+services:
+  memory:
+    build: .
+    ports: ["8080:8080"]
+    environment:
+      DOCUMENT_ROOT: /data/documents
+      SQLITE_PATH: /data/memory.db
+    volumes:
+      - ./documents:/data/documents:ro
+      - memory-data:/data
+  qdrant:
+    image: qdrant/qdrant:latest
+    profiles: [vector]
+    ports: ["6333:6333"]
+    volumes: [qdrant-data:/qdrant/storage]
+volumes:
+  memory-data:
+  qdrant-data:
