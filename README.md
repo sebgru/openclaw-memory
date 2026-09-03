@@ -1,8 +1,8 @@
 # Markdown Memory Index
 
-[![CI](https://github.com/sebgru/markdown-memory-index/actions/workflows/ci.yml/badge.svg)](https://github.com/sebgru/markdown-memory-index/actions/workflows/ci.yml)
-[![Coverage](https://codecov.io/gh/sebgru/markdown-memory-index/branch/main/graph/badge.svg)](https://codecov.io/gh/sebgru/markdown-memory-index)
-[![License: MIT](https://img.shields.io/github/license/sebgru/markdown-memory-index.svg)](LICENSE)
+[![CI](https://github.com/sebgru/openclaw-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/sebgru/openclaw-memory/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/sebgru/openclaw-memory/graph/badge.svg?token=tFqDeZtUiu)](https://codecov.io/gh/sebgru/openclaw-memory)
+[![License: MIT](https://img.shields.io/github/license/sebgru/openclaw-memory.svg?branch=main)](LICENSE)
 
 A standalone, public-safe Markdown indexing service. It scans a directory, chunks Markdown, and serves hybrid lexical/semantic search. SQLite FTS5 is the default backend; Qdrant can be enabled for vector search.
 
