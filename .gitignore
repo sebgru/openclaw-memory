@@ -10,6 +10,7 @@ build/
 .pytest_cache/
 .ruff_cache/
 *.db
+*.db.lock
 *.sqlite
 *.sqlite3
 .env
