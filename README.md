@@ -1,5 +1,9 @@
 # Markdown Memory Index
 
+[![CI](https://github.com/sebgru/markdown-memory-index/actions/workflows/ci.yml/badge.svg)](https://github.com/sebgru/markdown-memory-index/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/sebgru/markdown-memory-index/branch/main/graph/badge.svg)](https://codecov.io/gh/sebgru/markdown-memory-index)
+[![License: MIT](https://img.shields.io/github/license/sebgru/markdown-memory-index.svg)](LICENSE)
+
 A standalone, public-safe Markdown indexing service. It scans a directory, chunks Markdown, and serves hybrid lexical/semantic search. SQLite FTS5 is the default backend; Qdrant can be enabled for vector search.
 
 ## Quick start
@@ -32,3 +36,38 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 Only Markdown files are read. Symlinks are ignored and file paths in results are relative to the configured document root.
 
 When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale, and rerunning `POST /index` retries changed files. SQLite search remains available during that outage.
+
+## CI/CD
+
+- **CI** (`ci.yml`): Ruff lint and format check, mypy type check, pytest with coverage (≥ 80%), Codecov upload, Docker build verification
+- **Release** (`release.yml`): triggered only on version tags (`v*.*.*`); runs tests, builds the Python package, and creates a GitHub Release with the wheel and sdist attached
+
+To publish a release:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+## Development
+
+This repository includes a VS Code devcontainer with the same local development tools used by CI.
+
+```sh
+# Install dev dependencies
+pip install -e .[dev]
+
+# Lint
+ruff check src tests
+
+# Format
+ruff format src tests
+
+# Type check
+mypy src
+
+# Tests
+pytest
+
+# Tests with coverage
+pytest --cov=memory_store --cov-report=term-missing
