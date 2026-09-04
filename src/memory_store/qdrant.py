@@ -1,4 +1,5 @@
 import json
+import uuid
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -48,7 +49,7 @@ class QdrantStore:
         self.ensure_collection()
         points = [
             {
-                "id": cid,
+                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, cid)),
                 "vector": embed(f"{heading} {body}"),
                 "payload": {"path": path, "heading": heading, "text": body, "line": line},
             }
