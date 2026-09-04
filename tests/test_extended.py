@@ -198,6 +198,23 @@ class QdrantExtendedTests(unittest.TestCase):
             with self.assertRaises(URLError):
                 store.upsert([("x", "a.md", "", "hello", 1)], lambda _: [0.0, 0.0])
 
+    def test_upsert_converts_content_hash_to_uuid_id(self):
+        store = self.make_store()
+        calls = []
+
+        def fake(req, timeout):
+            calls.append((req.method, json.loads(req.data) if req.data else None))
+            if req.method == "GET":
+                return FakeResponse(
+                    {"result": {"config": {"params": {"vectors": {"size": 2}}}}}
+                )
+            return FakeResponse({})
+
+        with patch("memory_store.qdrant.urlopen", fake):
+            store.upsert([("a" * 64, "a.md", "", "hello", 1)], lambda _: [0.0, 0.0])
+        point_id = calls[-1][1]["points"][0]["id"]
+        self.assertRegex(point_id, r"^[0-9a-f-]{36}$")
+
 
 # ── Chunker edge cases ───────────────────────────────────────────────────────
 
