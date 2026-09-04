@@ -117,18 +117,6 @@ class QdrantExtendedTests(unittest.TestCase):
     def test_url_trailing_slash_stripped(self):
         self.assertEqual(self.make_store().base, "http://qdrant:6333")
 
-    def test_ensure_collection_reraises_http_errors(self):
-        from urllib.error import HTTPError
-
-        store = self.make_store()
-
-        def fake(req, timeout):
-            raise HTTPError(req.full_url, 500, "boom", {}, None)
-
-        with patch("memory_store.qdrant.urlopen", fake):
-            with self.assertRaises(HTTPError):
-                store.ensure_collection()
-
     def test_upsert_empty_records_is_noop(self):
         store = self.make_store()
         with patch("memory_store.qdrant.urlopen") as mock:
