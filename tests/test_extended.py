@@ -127,9 +127,64 @@ class QdrantExtendedTests(unittest.TestCase):
         store = self.make_store()
 
         def fake(req, timeout):
-            raise Exception("[409] collection already exists")
+            return FakeResponse({"result": {"config": {"params": {"vectors": {"size": 2}}}}})
 
         with patch("memory_store.qdrant.urlopen", fake):
+            store.ensure_collection()  # must not raise
+
+    def test_ensure_collection_creates_missing_collection(self):
+        store = self.make_store()
+        calls = []
+
+        def fake(req, timeout):
+            calls.append(req.method)
+            if req.method == "GET":
+                from urllib.error import HTTPError
+
+                raise HTTPError(req.full_url, 404, "missing", {}, None)
+            return FakeResponse({})
+
+        with patch("memory_store.qdrant.urlopen", fake):
+            store.ensure_collection()
+        self.assertEqual(calls, ["GET", "PUT"])
+
+    def test_ensure_collection_rejects_dimension_mismatch(self):
+        store = self.make_store()
+        with patch(
+            "memory_store.qdrant.urlopen",
+            lambda req, timeout: FakeResponse(
+                {"result": {"config": {"params": {"vectors": {"size": 1024}}}}}
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "dimension"):
+                store.ensure_collection()
+
+    def test_ensure_collection_reraises_http_errors(self):
+        from urllib.error import HTTPError
+
+        store = self.make_store()
+
+        def fake(req, timeout):
+            raise HTTPError(req.full_url, 500, "boom", {}, None)
+
+        with patch("memory_store.qdrant.urlopen", fake):
+            with self.assertRaises(HTTPError):
+                store.ensure_collection()
+
+    def test_ensure_collection_ignores_unexpected_info_shape(self):
+        store = self.make_store()
+        with patch(
+            "memory_store.qdrant.urlopen",
+            lambda req, timeout: FakeResponse({"result": "unexpected"}),
+        ):
+            store.ensure_collection()  # must not raise
+
+    def test_ensure_collection_ignores_missing_dimension(self):
+        store = self.make_store()
+        with patch(
+            "memory_store.qdrant.urlopen",
+            lambda req, timeout: FakeResponse({}),
+        ):
             store.ensure_collection()  # must not raise
 
     def test_ensure_collection_reraises_other_errors(self):

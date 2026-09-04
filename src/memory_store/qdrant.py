@@ -1,4 +1,5 @@
 import json
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -23,15 +24,23 @@ class QdrantStore:
             return json.load(response)
 
     def ensure_collection(self):
+        path = "/collections/" + quote(self.collection, safe="")
         try:
-            self._request(
-                "PUT",
-                "/collections/" + quote(self.collection, safe=""),
-                {"vectors": {"size": self.dimensions, "distance": "Cosine"}},
-            )
-        except Exception as exc:
-            if "already exists" not in str(exc):
+            info = self._request("GET", path)
+        except HTTPError as exc:
+            if exc.code != 404:
                 raise
+            self._request("PUT", path, {"vectors": {"size": self.dimensions, "distance": "Cosine"}})
+            return
+        result = info.get("result", {})
+        if not isinstance(result, dict):
+            return
+        vectors = result.get("config", {}).get("params", {}).get("vectors", {})
+        size = vectors.get("size")
+        if size is not None and size != self.dimensions:
+            raise ValueError(
+                f"Qdrant collection dimension {size} does not match configured {self.dimensions}"
+            )
 
     def upsert(self, records, embed):
         if not records:
