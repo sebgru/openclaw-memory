@@ -30,9 +30,7 @@ class QdrantStore:
         except HTTPError as exc:
             if exc.code != 404:
                 raise
-            self._request(
-                "PUT", path, {"vectors": {"size": self.dimensions, "distance": "Cosine"}}
-            )
+            self._request("PUT", path, {"vectors": {"size": self.dimensions, "distance": "Cosine"}})
             return
         result = info.get("result", {})
         if not isinstance(result, dict):
