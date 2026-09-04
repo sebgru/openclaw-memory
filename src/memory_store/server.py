@@ -10,6 +10,15 @@ from .sqlite_store import SQLiteStore
 
 ROOT = os.getenv("DOCUMENT_ROOT", "./documents")
 DIM = int(os.getenv("EMBEDDING_DIMENSIONS", "128"))
+
+
+def patterns(name, default):
+    return tuple(item.strip() for item in os.getenv(name, default).split(",") if item.strip())
+
+
+INCLUDE_PATTERNS = patterns("INCLUDE_PATTERNS", "**/*.md")
+EXCLUDE_PATTERNS = patterns("EXCLUDE_PATTERNS", "**/review-candidates/**,**/archive/**")
+ARCHIVE_ROOT = os.getenv("ARCHIVE_ROOT")
 embedder = EmbeddingClient(os.getenv("EMBEDDING_URL"), os.getenv("EMBEDDING_MODEL", "default"), DIM)
 store = SQLiteStore(os.getenv("SQLITE_PATH", "memory.db"), DIM)
 vector_store = (
@@ -17,17 +26,54 @@ vector_store = (
     if os.getenv("QDRANT_URL")
     else None
 )
+archive_store = (
+    SQLiteStore(os.getenv("ARCHIVE_SQLITE_PATH", "archive.db"), DIM) if ARCHIVE_ROOT else None
+)
+archive_vector_store = (
+    QdrantStore(
+        os.getenv("QDRANT_URL"),
+        os.getenv("ARCHIVE_QDRANT_COLLECTION", "memory-archive"),
+        DIM,
+    )
+    if ARCHIVE_ROOT and os.getenv("QDRANT_URL")
+    else None
+)
 
 
-def hybrid_search(query, limit):
-    lexical = store.search(query, limit * 3)
-    semantic = vector_store.search(embedder.embed(query), limit * 3) if vector_store else []
+_DEFAULT_VECTOR = object()
+
+
+def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFAULT_VECTOR):
+    selected_store = selected_store or store
+    selected_vector_store = (
+        vector_store if selected_vector_store is _DEFAULT_VECTOR else selected_vector_store
+    )
+    lexical = selected_store.search(query, limit * 3)
+    try:
+        semantic = (
+            selected_vector_store.search(embedder.embed(query), limit * 3)
+            if selected_vector_store
+            else []
+        )
+    except Exception:
+        semantic = []
     merged: dict = {}
     for rank, row in enumerate(lexical):
         merged.setdefault(row["id"], {**row, "score": 0})["score"] += 1 / (60 + rank + 1)
     for rank, row in enumerate(semantic):
         merged.setdefault(row["id"], row)["score"] += 1 / (60 + rank + 1)
     return sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
+
+
+def indexer(root, selected_store, selected_vector_store, includes=("**/*.md",), excludes=()):
+    return Indexer(
+        root,
+        selected_store,
+        vector_store=selected_vector_store,
+        embed=embedder.embed,
+        include_patterns=includes,
+        exclude_patterns=excludes,
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -50,7 +96,14 @@ class Handler(BaseHTTPRequestHandler):
                     **store.status(),
                 },
             )
-        if parsed.path == "/search":
+        if parsed.path == "/archive/status":
+            if not archive_store:
+                return self.send_json(404, {"error": "archive is not configured"})
+            return self.send_json(200, {"status": "ok", **archive_store.status()})
+        if parsed.path in ("/search", "/archive/search"):
+            is_archive = parsed.path.startswith("/archive/")
+            if is_archive and not archive_store:
+                return self.send_json(404, {"error": "archive is not configured"})
             query = params.get("q", [""])[0]
             try:
                 limit = int(params.get("limit", [10])[0])
@@ -61,7 +114,17 @@ class Handler(BaseHTTPRequestHandler):
                     400, {"error": "q is required and limit must be between 1 and 100"}
                 )
             try:
-                return self.send_json(200, {"results": hybrid_search(query, limit)})
+                return self.send_json(
+                    200,
+                    {
+                        "results": hybrid_search(
+                            query,
+                            limit,
+                            archive_store if is_archive else store,
+                            archive_vector_store if is_archive else vector_store,
+                        )
+                    },
+                )
             except Exception as exc:
                 return self.send_json(
                     503, {"error": "search backend unavailable", "detail": str(exc)}
@@ -69,12 +132,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path != "/index":
+        if self.path not in ("/index", "/archive/index"):
             return self.send_json(404, {"error": "not found"})
+        is_archive = self.path == "/archive/index"
+        if is_archive and not archive_store:
+            return self.send_json(404, {"error": "archive is not configured"})
         try:
             return self.send_json(
                 200,
-                Indexer(ROOT, store, vector_store=vector_store, embed=embedder.embed)
+                indexer(
+                    ARCHIVE_ROOT if is_archive else ROOT,
+                    archive_store if is_archive else store,
+                    archive_vector_store if is_archive else vector_store,
+                    ("**/*.md",) if is_archive else INCLUDE_PATTERNS,
+                    () if is_archive else EXCLUDE_PATTERNS,
+                )
                 .scan()
                 .as_dict(),
             )

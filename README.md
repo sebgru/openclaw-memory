@@ -14,7 +14,9 @@ curl -X POST http://localhost:8080/index
 curl 'http://localhost:8080/search?q=release%20notes&limit=5'
 ```
 
-Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, and `PORT`. No credentials or deployment-specific paths are required.
+Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PATTERNS`, `EXCLUDE_PATTERNS`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, and `PORT`. No credentials or deployment-specific paths are required.
+
+For a tiered memory layout, including a separate historical session archive and a human-reviewed promotion workflow, see [Tiered memory architecture](docs/MEMORY_ARCHITECTURE.md). Set `ARCHIVE_ROOT`, `ARCHIVE_SQLITE_PATH`, and optionally `ARCHIVE_QDRANT_COLLECTION` to enable the explicit `/archive/*` API.
 
 Run locally with Python 3.11+:
 
@@ -32,14 +34,15 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 - `POST /index` scans and incrementally indexes Markdown files; response includes added, changed, removed, and unchanged counts.
 - `GET /search?q=...&limit=10` returns ranked results combining FTS5 and vector scores.
 - `GET /healthz` returns service health.
+- `POST /archive/index`, `GET /archive/search`, and `GET /archive/status` operate on the separately configured historical archive.
 
 Only Markdown files are read. Symlinks are ignored and file paths in results are relative to the configured document root.
 
-When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale, and rerunning `POST /index` retries changed files. SQLite search remains available during that outage.
+When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale, and rerunning `POST /index` retries changed files. Search falls back to SQLite FTS5 during a Qdrant or embedding outage.
 
 ## CI/CD
 
-- **CI** (`ci.yml`): Ruff lint and format check, mypy type check, pytest with coverage (≥ 80%), Codecov upload, Docker build verification
+- **CI** (`ci.yml`): Ruff lint and format check, mypy type check, pytest with coverage (≥ 99%), Codecov upload, Docker build verification
 - **Release** (`release.yml`): triggered only on version tags (`v*.*.*`); runs tests, builds the Python package, and creates a GitHub Release with the wheel and sdist attached
 
 To publish a release:

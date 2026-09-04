@@ -40,6 +40,26 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             Indexer(self.root / "missing", self.store).scan()
 
+    def test_include_and_exclude_patterns(self):
+        (self.root / "MEMORY.md").write_text("# Durable\nkeep this")
+        (self.root / "OTHER.md").write_text("# Other\nignore this")
+        (self.root / "memory" / "review-candidates").mkdir(parents=True)
+        (self.root / "memory" / "daily.md").write_text("# Daily\nremember this")
+        (self.root / "memory" / "review-candidates" / "draft.md").write_text(
+            "# Draft\nnot authoritative"
+        )
+        stats = Indexer(
+            self.root,
+            self.store,
+            include_patterns=("MEMORY.md", "memory/**/*.md"),
+            exclude_patterns=("memory/review-candidates/**",),
+        ).scan()
+        self.assertEqual(stats.added, 2)
+        self.assertTrue(self.store.search("keep"))
+        self.assertTrue(self.store.search("remember"))
+        self.assertFalse(self.store.search("authoritative"))
+        self.assertIsNone(self.store.file_digest("OTHER.md"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 import fcntl
+import fnmatch
 import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,13 +20,24 @@ class ScanStats:
 
 
 class Indexer:
-    def __init__(self, root, store, chunk_size=1600, vector_store=None, embed=None):
+    def __init__(
+        self,
+        root,
+        store,
+        chunk_size=1600,
+        vector_store=None,
+        embed=None,
+        include_patterns=("**/*.md",),
+        exclude_patterns=(),
+    ):
         self.root, self.store, self.chunk_size, self.vector_store = (
             Path(root),
             store,
             chunk_size,
             vector_store,
         )
+        self.include_patterns = tuple(include_patterns)
+        self.exclude_patterns = tuple(exclude_patterns)
         self.embed = embed or (lambda text, dimensions=None: hash_embedding(text, store.dimensions))
         db_path = store.db.execute("PRAGMA database_list").fetchone()[2]
         self.lock_path = db_path + ".lock" if db_path else str(self.root / ".index.lock")
@@ -39,10 +51,19 @@ class Indexer:
 
     def _scan(self):
         stats, seen = ScanStats(), set()
-        for path in sorted(self.root.rglob("*.md")):
+        candidates = {
+            path
+            for pattern in self.include_patterns
+            for path in self.root.glob(pattern)
+            if path.suffix.lower() == ".md"
+        }
+        for path in sorted(candidates):
             if path.is_symlink() or not path.is_file():
                 continue
-            rel, content = path.relative_to(self.root).as_posix(), path.read_text(encoding="utf-8")
+            rel = path.relative_to(self.root).as_posix()
+            if any(fnmatch.fnmatch(rel, pattern) for pattern in self.exclude_patterns):
+                continue
+            content = path.read_text(encoding="utf-8")
             seen.add(rel)
             digest, old = hashlib.sha256(content.encode()).hexdigest(), self.store.file_digest(rel)
             if old == digest:
