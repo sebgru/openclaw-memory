@@ -334,6 +334,41 @@ class ApiExtendedTests(unittest.TestCase):
         self.assertEqual(body["error"], "search backend unavailable")
         self.assertEqual(body["detail"], "boom")
 
+    def test_archive_routes_when_not_configured(self):
+        self.assertEqual(self.request("GET", "/archive/status")[0], 404)
+        self.assertEqual(self.request("GET", "/archive/search?q=x")[0], 404)
+        self.assertEqual(self.request("POST", "/archive/index")[0], 404)
+
+    def test_archive_routes_use_separate_store(self):
+        archive_dir = Path(self.tmp.name) / "archive"
+        archive_dir.mkdir(exist_ok=True)
+        (archive_dir / "old.md").write_text("# Old\nhistorical evidence")
+        archive_db = SQLiteStore()
+        previous = (server.ARCHIVE_ROOT, server.archive_store, server.archive_vector_store)
+        server.ARCHIVE_ROOT = str(archive_dir)
+        server.archive_store = archive_db
+        server.archive_vector_store = None
+        try:
+            self.assertEqual(self.request("POST", "/archive/index")[0], 200)
+            status, body = self.request("GET", "/archive/search?q=historical")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["results"][0]["path"], "old.md")
+            status, body = self.request("GET", "/archive/status")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["files"], 1)
+        finally:
+            server.ARCHIVE_ROOT, server.archive_store, server.archive_vector_store = previous
+            archive_db.close()
+
+    def test_semantic_failure_falls_back_to_lexical(self):
+        with (
+            patch.object(server.store, "search", return_value=[{"id": "a", "score": 1.0}]),
+            patch.object(server.embedder, "embed", side_effect=RuntimeError("offline")),
+            patch.object(server, "vector_store", object()),
+        ):
+            results = server.hybrid_search("query", 5)
+        self.assertEqual(results[0]["id"], "a")
+
 
 class IndexerVectorStoreTests(unittest.TestCase):
     def setUp(self):
