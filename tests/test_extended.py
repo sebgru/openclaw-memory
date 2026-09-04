@@ -171,6 +171,34 @@ class QdrantExtendedTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "dimension"):
                 store.ensure_collection()
 
+    def test_ensure_collection_reraises_http_errors(self):
+        from urllib.error import HTTPError
+
+        store = self.make_store()
+
+        def fake(req, timeout):
+            raise HTTPError(req.full_url, 500, "boom", {}, None)
+
+        with patch("memory_store.qdrant.urlopen", fake):
+            with self.assertRaises(HTTPError):
+                store.ensure_collection()
+
+    def test_ensure_collection_ignores_unexpected_info_shape(self):
+        store = self.make_store()
+        with patch(
+            "memory_store.qdrant.urlopen",
+            lambda req, timeout: FakeResponse({"result": "unexpected"}),
+        ):
+            store.ensure_collection()  # must not raise
+
+    def test_ensure_collection_ignores_missing_dimension(self):
+        store = self.make_store()
+        with patch(
+            "memory_store.qdrant.urlopen",
+            lambda req, timeout: FakeResponse({}),
+        ):
+            store.ensure_collection()  # must not raise
+
     def test_ensure_collection_reraises_other_errors(self):
         store = self.make_store()
 
