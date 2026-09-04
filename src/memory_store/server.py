@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -7,6 +9,8 @@ from .embeddings import EmbeddingClient
 from .indexer import Indexer
 from .qdrant import QdrantStore
 from .sqlite_store import SQLiteStore
+
+logger = logging.getLogger("memory_store")
 
 ROOT = os.getenv("DOCUMENT_ROOT", "./documents")
 DIM = int(os.getenv("EMBEDDING_DIMENSIONS", "128"))
@@ -55,7 +59,8 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
             if selected_vector_store
             else []
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("semantic search unavailable, falling back to FTS: %s", exc)
         semantic = []
     merged: dict = {}
     for rank, row in enumerate(lexical):
@@ -86,6 +91,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        started = time.monotonic()
         parsed, params = urlparse(self.path), parse_qs(urlparse(self.path).query)
         if parsed.path in ("/healthz", "/status"):
             return self.send_json(
@@ -114,18 +120,23 @@ class Handler(BaseHTTPRequestHandler):
                     400, {"error": "q is required and limit must be between 1 and 100"}
                 )
             try:
-                return self.send_json(
-                    200,
-                    {
-                        "results": hybrid_search(
-                            query,
-                            limit,
-                            archive_store if is_archive else store,
-                            archive_vector_store if is_archive else vector_store,
-                        )
-                    },
+                results = hybrid_search(
+                    query,
+                    limit,
+                    archive_store if is_archive else store,
+                    archive_vector_store if is_archive else vector_store,
                 )
+                logger.info(
+                    "%s q=%r limit=%d results=%d took=%.1fms",
+                    parsed.path,
+                    query,
+                    limit,
+                    len(results),
+                    (time.monotonic() - started) * 1000,
+                )
+                return self.send_json(200, {"results": results})
             except Exception as exc:
+                logger.exception("%s failed", parsed.path)
                 return self.send_json(
                     503, {"error": "search backend unavailable", "detail": str(exc)}
                 )
@@ -138,24 +149,33 @@ class Handler(BaseHTTPRequestHandler):
         if is_archive and not archive_store:
             return self.send_json(404, {"error": "archive is not configured"})
         try:
-            return self.send_json(
-                200,
-                indexer(
-                    ARCHIVE_ROOT if is_archive else ROOT,
-                    archive_store if is_archive else store,
-                    archive_vector_store if is_archive else vector_store,
-                    ("**/*.md",) if is_archive else INCLUDE_PATTERNS,
-                    () if is_archive else EXCLUDE_PATTERNS,
-                )
-                .scan()
-                .as_dict(),
-            )
+            stats = indexer(
+                ARCHIVE_ROOT if is_archive else ROOT,
+                archive_store if is_archive else store,
+                archive_vector_store if is_archive else vector_store,
+                ("**/*.md",) if is_archive else INCLUDE_PATTERNS,
+                () if is_archive else EXCLUDE_PATTERNS,
+            ).scan()
+            logger.info("%s %s", self.path, stats.as_dict())
+            return self.send_json(200, stats.as_dict())
         except (OSError, UnicodeError, ValueError) as exc:
+            logger.warning("%s failed: %s", self.path, exc)
             return self.send_json(400, {"error": str(exc)})
 
-    def log_message(self, *_):
-        pass
+    def log_message(self, format, *args):
+        logger.info("%s - %s", self.address_string(), format % args)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logger.info(
+        "starting server on port %s (document_root=%s, qdrant=%s, archive_root=%s)",
+        os.getenv("PORT", "8080"),
+        ROOT,
+        bool(vector_store),
+        ARCHIVE_ROOT or "disabled",
+    )
     ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler).serve_forever()
