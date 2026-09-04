@@ -14,9 +14,24 @@ curl -X POST http://localhost:8080/index
 curl 'http://localhost:8080/search?q=release%20notes&limit=5'
 ```
 
-Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PATTERNS`, `EXCLUDE_PATTERNS`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, and `PORT`. No credentials or deployment-specific paths are required.
+Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PATTERNS`, `EXCLUDE_PATTERNS`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, `LOG_LEVEL`, and `PORT`. No credentials or deployment-specific paths are required.
 
 For a tiered memory layout, including a separate historical session archive and a human-reviewed promotion workflow, see [Tiered memory architecture](docs/MEMORY_ARCHITECTURE.md). Set `ARCHIVE_ROOT`, `ARCHIVE_SQLITE_PATH`, and optionally `ARCHIVE_QDRANT_COLLECTION` to enable the explicit `/archive/*` API.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DOCUMENT_ROOT` | `./documents` | Directory scanned for Markdown by `POST /index` |
+| `INCLUDE_PATTERNS` | `**/*.md` | Comma-separated glob patterns of files to index |
+| `EXCLUDE_PATTERNS` | `**/review-candidates/**,**/archive/**` | Comma-separated glob patterns of files to skip |
+| `SQLITE_PATH` | `memory.db` | SQLite database (FTS5) for indexed state |
+| `QDRANT_URL` | unset | Enables vector search via Qdrant when set |
+| `QDRANT_COLLECTION` | `memory` | Qdrant collection for the main index |
+| `EMBEDDING_DIMENSIONS` | `128` | Vector dimensions for the embedding function |
+| `ARCHIVE_ROOT` | unset | Enables the archive API; separate SQLite/Qdrant collections |
+| `ARCHIVE_SQLITE_PATH` | `archive.db` | SQLite database for the archive index |
+| `ARCHIVE_QDRANT_COLLECTION` | `memory-archive` | Qdrant collection for the archive index |
+| `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` also logs unchanged files) |
+| `PORT` | `8080` | HTTP port the server listens on |
 
 Run locally with Python 3.11+:
 
@@ -37,6 +52,10 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 - `POST /archive/index`, `GET /archive/search`, and `GET /archive/status` operate on the separately configured historical archive.
 
 Only Markdown files are read. Symlinks are ignored and file paths in results are relative to the configured document root.
+
+## Logging
+
+The service logs to stdout: startup configuration, HTTP access lines, search outcomes (query, limit, result count, latency), index outcomes (added/changed/removed/unchanged counts), per-file indexer decisions, and errors with tracebacks. `LOG_LEVEL` controls verbosity (`INFO` by default; set `DEBUG` to also log unchanged files during indexing). Semantic-search failures that fall back to FTS5 are logged as warnings.
 
 When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale, and rerunning `POST /index` retries changed files. Search falls back to SQLite FTS5 during a Qdrant or embedding outage.
 
