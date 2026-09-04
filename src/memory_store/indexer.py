@@ -1,11 +1,14 @@
 import fcntl
 import fnmatch
 import hashlib
+import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .chunker import chunk_markdown
 from .embeddings import hash_embedding
+
+logger = logging.getLogger("memory_store.indexer")
 
 
 @dataclass
@@ -68,6 +71,7 @@ class Indexer:
             digest, old = hashlib.sha256(content.encode()).hexdigest(), self.store.file_digest(rel)
             if old == digest:
                 stats.unchanged += 1
+                logger.debug("unchanged: %s", rel)
                 continue
             chunks = [
                 (
@@ -88,12 +92,15 @@ class Indexer:
                 )
             if old is None:
                 stats.added += 1
+                logger.info("added: %s (%d chunks)", rel, len(chunks))
             else:
                 stats.changed += 1
+                logger.info("changed: %s (%d chunks)", rel, len(chunks))
         for rel in [r[0] for r in self.store.db.execute("SELECT path FROM files")]:
             if rel not in seen:
                 self.store.delete_file(rel)
                 if self.vector_store:
                     self.vector_store.delete_file(rel)
                 stats.removed += 1
+                logger.info("removed: %s", rel)
         return stats
