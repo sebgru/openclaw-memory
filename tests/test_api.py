@@ -31,6 +31,19 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.request("/search?q=x&limit=no"), 400)
         self.assertEqual(self.request("/status"), 200)
 
+    def test_search_exposes_separate_hybrid_scores(self):
+        original = server.store.search
+        try:
+            server.store.search = lambda query, limit: [
+                {"id": "one", "text": "fact", "path": "a.md", "score": 2.0}
+            ]
+            result = server.hybrid_search("fact", 1, server.store, None)[0]
+            self.assertGreater(result["lexical_score"], 0)
+            self.assertEqual(result["semantic_score"], 0)
+            self.assertEqual(result["score"], result["lexical_score"])
+        finally:
+            server.store.search = original
+
 
 if __name__ == "__main__":
     unittest.main()

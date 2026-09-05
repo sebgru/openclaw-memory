@@ -48,11 +48,17 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 
 - `POST /index` scans and incrementally indexes Markdown files; response includes added, changed, removed, and unchanged counts.
 - `GET /search?q=...&limit=10` returns ranked results combining FTS5 and vector scores.
+- Search results include the combined `score` plus separate `lexical_score` and
+  `semantic_score` contributions for diagnostics.
 - `GET /healthz` returns service health.
 - `POST /archive/index`, `GET /archive/search`, and `GET /archive/status` operate on the separately configured historical archive.
 - `GET /promotion/candidates` lists queued candidates; `POST /promotion/promote` promotes one only with an explicit `approved_by` value.
 
 SQLite maintenance is setup-independent: `python -m memory_store.maintenance backup --source memory.db --destination backups/memory.db` creates a consistent backup and verifies both the backup and a temporary restore. Schedule this command externally if desired; the service never promotes candidates automatically.
+
+For a locked deployment-side archive run, use `scripts/archive-maintenance.sh`
+with `MEMORY_ENDPOINT` set. It calls only `POST /archive/index` and exits
+without overlapping an existing run.
 
 Only Markdown files are read. Symlinks are ignored and file paths in results are relative to the configured document root.
 
