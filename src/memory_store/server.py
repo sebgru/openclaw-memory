@@ -7,6 +7,8 @@ from urllib.parse import parse_qs, urlparse
 
 from .embeddings import EmbeddingClient
 from .indexer import Indexer
+from .maintenance import verify_database
+from .promotion import PromotionError, candidates, promote
 from .qdrant import QdrantStore
 from .sqlite_store import SQLiteStore
 
@@ -94,14 +96,18 @@ class Handler(BaseHTTPRequestHandler):
         started = time.monotonic()
         parsed, params = urlparse(self.path), parse_qs(urlparse(self.path).query)
         if parsed.path in ("/healthz", "/status"):
+            integrity = verify_database(store.db.execute("PRAGMA database_list").fetchone()[2])
             return self.send_json(
                 200,
                 {
-                    "status": "ok",
+                    "status": integrity["status"],
                     "backend": "sqlite+qdrant" if vector_store else "sqlite",
+                    "database": integrity,
                     **store.status(),
                 },
             )
+        if parsed.path == "/promotion/candidates":
+            return self.send_json(200, {"candidates": candidates(ROOT)})
         if parsed.path == "/archive/status":
             if not archive_store:
                 return self.send_json(404, {"error": "archive is not configured"})
@@ -143,6 +149,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path == "/promotion/promote":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                result = promote(
+                    ROOT, payload["candidate"], payload["destination"], payload["approved_by"]
+                )
+                return self.send_json(200, result)
+            except (KeyError, TypeError, json.JSONDecodeError, PromotionError) as exc:
+                return self.send_json(400, {"error": str(exc)})
         if self.path not in ("/index", "/archive/index"):
             return self.send_json(404, {"error": "not found"})
         is_archive = self.path == "/archive/index"
