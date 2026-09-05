@@ -24,7 +24,6 @@
                 "charliermarsh.ruff",
                 "ms-python.mypy-type-checker",
                 "tamasfe.even-better-toml",
-                "eamodio.gitlens",
                 "github.vscode-github-actions",
                 "streetsidesoftware.code-spell-checker"
             ],
