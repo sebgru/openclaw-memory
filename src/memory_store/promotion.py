@@ -16,17 +16,21 @@ def candidates(root: str | Path) -> list[dict[str, str]]:
     queue = root / "memory" / "review-candidates"
     if not queue.is_dir():
         return []
-    return [
-        {
-            "path": p.relative_to(root).as_posix(),
-            "modified": str(p.stat().st_mtime_ns),
-            "bytes": str(p.stat().st_size),
-            "eligible": "true" if _quality_error(p) is None else "false",
-            **({} if _quality_error(p) is None else {"reason": _quality_error(p)}),
+    result = []
+    for path in sorted(queue.rglob("*.md")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        quality_error = _quality_error(path)
+        record = {
+            "path": path.relative_to(root).as_posix(),
+            "modified": str(path.stat().st_mtime_ns),
+            "bytes": str(path.stat().st_size),
+            "eligible": "true" if quality_error is None else "false",
         }
-        for p in sorted(queue.rglob("*.md"))
-        if p.is_file() and not p.is_symlink()
-    ]
+        if quality_error is not None:
+            record["reason"] = quality_error
+        result.append(record)
+    return result
 
 
 def _quality_error(source: Path) -> str | None:
@@ -61,7 +65,9 @@ def promote(root: str | Path, candidate: str, destination: str, approved_by: str
     if quality_error:
         raise PromotionError(quality_error)
     if target.exists():
-        raise PromotionError("destination already exists; choose a new reviewed file")
+        raise PromotionError(
+            "destination already exists; choose a new reviewed file"
+        )
     target.parent.mkdir(parents=True, exist_ok=True)
     content = source.read_text(encoding="utf-8")
     marker = f"\n\n<!-- promoted from {candidate}; approved by {approved_by.strip()} -->\n"
