@@ -26,7 +26,10 @@ def backup_database(source: str | Path, destination: str | Path, verify_restore=
     if verify_restore:
         restored = destination.with_suffix(destination.suffix + ".restore-check")
         try:
-            with sqlite3.connect(str(destination)) as backup_db, sqlite3.connect(str(restored)) as restore_db:
+            with (
+                sqlite3.connect(str(destination)) as backup_db,
+                sqlite3.connect(str(restored)) as restore_db,
+            ):
                 backup_db.backup(restore_db)
             result["restore_verification"] = verify_database(restored)
         finally:
@@ -43,5 +46,9 @@ if __name__ == "__main__":
     backup.add_argument("--source", required=True)
     backup.add_argument("--destination", required=True)
     args = parser.parse_args()
-    output = verify_database(args.source) if args.command == "verify" else backup_database(args.source, args.destination)
+    output = (
+        verify_database(args.source)
+        if args.command == "verify"
+        else backup_database(args.source, args.destination)
+    )
     print(json.dumps(output, sort_keys=True))

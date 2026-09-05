@@ -409,6 +409,55 @@ class ApiExtendedTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/archive/search?q=x")[0], 404)
         self.assertEqual(self.request("POST", "/archive/index")[0], 404)
 
+    def test_promotion_candidates_route(self):
+        (Path(self.tmp.name) / "memory/review-candidates").mkdir(parents=True, exist_ok=True)
+        (Path(self.tmp.name) / "memory/review-candidates/note.md").write_text("# Note\nbody")
+        status, body = self.request("GET", "/promotion/candidates")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["candidates"][0]["path"], "memory/review-candidates/note.md")
+
+    def test_promote_route_success_and_validation(self):
+        root = Path(self.tmp.name)
+        (root / "memory/review-candidates").mkdir(parents=True, exist_ok=True)
+        (root / "memory/review-candidates/note.md").write_text("# Note\nbody")
+        status, body = self.request(
+            "POST",
+            "/promotion/promote",
+            json.dumps(
+                {
+                    "candidate": "memory/review-candidates/note.md",
+                    "destination": "memory/knowledge/note.md",
+                    "approved_by": "human",
+                }
+            ),
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["approved_by"], "human")
+        # The promoted file lives under ROOT; verify it exists, then remove it so
+        # later tests that POST /index are not affected by the extra document.
+        promoted = root / "memory/knowledge/note.md"
+        self.assertTrue(promoted.exists())
+        promoted.unlink()
+        # Validation errors -> 400
+        self.assertEqual(
+            self.request(
+                "POST", "/promotion/promote", json.dumps({"candidate": "a", "destination": "b"})
+            )[0],
+            400,
+        )
+        self.assertEqual(self.request("POST", "/promotion/promote", "{bad json")[0], 400)
+        self.assertEqual(
+            self.request(
+                "POST",
+                "/promotion/promote",
+                json.dumps({"candidate": "x", "destination": "y", "approved_by": "h"}),
+            )[0],
+            400,
+        )
+
+    def test_search_limit_not_an_integer_returns_400(self):
+        self.assertEqual(self.request("GET", "/search?q=x&limit=abc")[0], 400)
+
     def test_archive_routes_use_separate_store(self):
         archive_dir = Path(self.tmp.name) / "archive"
         archive_dir.mkdir(exist_ok=True)
