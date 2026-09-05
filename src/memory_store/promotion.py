@@ -65,9 +65,7 @@ def promote(root: str | Path, candidate: str, destination: str, approved_by: str
     if quality_error:
         raise PromotionError(quality_error)
     if target.exists():
-        raise PromotionError(
-            "destination already exists; choose a new reviewed file"
-        )
+        raise PromotionError("destination already exists; choose a new reviewed file")
     target.parent.mkdir(parents=True, exist_ok=True)
     content = source.read_text(encoding="utf-8")
     marker = f"\n\n<!-- promoted from {candidate}; approved by {approved_by.strip()} -->\n"
