@@ -7,6 +7,7 @@ from pathlib import Path
 
 MAX_CANDIDATE_BYTES = 256 * 1024
 
+
 class PromotionError(ValueError):
     pass
 
