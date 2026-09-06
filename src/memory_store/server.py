@@ -66,9 +66,25 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         semantic = []
     merged: dict = {}
     for rank, row in enumerate(lexical):
-        merged.setdefault(row["id"], {**row, "score": 0})["score"] += 1 / (60 + rank + 1)
+        score = 1 / (60 + rank + 1)
+        item = merged.setdefault(
+            row["id"], {**row, "score": 0, "lexical_score": 0, "semantic_score": 0}
+        )
+        item["score"] += score
+        item["lexical_score"] += score
     for rank, row in enumerate(semantic):
-        merged.setdefault(row["id"], row)["score"] += 1 / (60 + rank + 1)
+        score = 1 / (60 + rank + 1)
+        item = merged.setdefault(
+            row["id"],
+            {
+                **row,
+                "score": row.get("score", 0),
+                "lexical_score": 0,
+                "semantic_score": 0,
+            },
+        )
+        item["score"] += score
+        item["semantic_score"] += score
     return sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
 
 

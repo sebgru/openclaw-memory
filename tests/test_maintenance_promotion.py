@@ -88,6 +88,24 @@ class PromotionTests(unittest.TestCase):
     def test_candidates_returns_empty_for_missing_queue(self):
         self.assertEqual(candidates(self.root / "nonexistent"), [])
 
+    def test_candidates_marks_empty_files_ineligible(self):
+        empty = self.candidate.parent / "empty.md"
+        empty.write_text("\n")
+        result = {item["path"]: item for item in candidates(self.root)}
+        self.assertEqual(result["memory/review-candidates/empty.md"]["eligible"], "false")
+        self.assertEqual(
+            result["memory/review-candidates/empty.md"]["reason"], "candidate is empty"
+        )
+
+    def test_promotion_does_not_overwrite_reviewed_destination(self):
+        target = self.root / "memory/knowledge/fact.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("existing")
+        with self.assertRaises(PromotionError):
+            promote(
+                self.root, "memory/review-candidates/fact.md", "memory/knowledge/fact.md", "human"
+            )
+
     def test_promotion_rejects_missing_candidate(self):
         with self.assertRaises(PromotionError):
             promote(
