@@ -59,7 +59,7 @@ Session archives are append-only historical evidence, not automatically trusted 
 
 - `POST /archive/index` incrementally indexes archive Markdown.
 - `GET /archive/search?q=...` searches only the archive.
-- `GET /archive/status` reports archive counts.
+- `GET /archive/status` reports archive counts, SQLite integrity, index freshness/error metadata, and (when configured) Qdrant point/chunk parity.
 
 Archive maintenance is incremental: repeated `/archive/index` calls compare
 SHA-256 digests, index only added/changed Markdown, and remove records for
@@ -70,7 +70,9 @@ separate from the authoritative tier.
 ## Monitoring and recovery
 
 `GET /healthz` runs SQLite's integrity check and returns `status: ok` plus
-database counts; a failed check returns `status: error`. For independent
+database counts, index freshness/error metadata, and Qdrant point/chunk parity;
+a failed check returns `status: error`. Archive status performs the same
+SQLite integrity check for the archive database. For independent
 maintenance, run `python -m memory_store.maintenance verify --source
 memory.db` or `python -m memory_store.maintenance backup --source memory.db
 --destination backups/memory.db`. Backups use SQLite's online backup API and
@@ -85,6 +87,12 @@ archive endpoint; do not run overlapping requests or rebuild the native
 OpenClaw index as part of this job.
 
 Normal `/search` never falls through to the archive implicitly. Applications may call archive search explicitly or only when normal recall returns no useful result.
+
+If parity diagnostics report missing vectors, an operator may run
+`POST /reconcile` (or `/archive/reconcile`) with JSON `{"confirm":true}`.
+The operation takes a dedicated lock and only upserts vectors whose deterministic
+point IDs are absent; it does not delete or replace any Qdrant point. Do not
+schedule this endpoint as an automatic rebuild.
 
 ## Rebuild-loop monitoring
 

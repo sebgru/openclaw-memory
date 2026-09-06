@@ -2,6 +2,7 @@ import fcntl
 import fnmatch
 import hashlib
 import logging
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -46,11 +47,21 @@ class Indexer:
         self.lock_path = db_path + ".lock" if db_path else str(self.root / ".index.lock")
 
     def scan(self):
+        self.store.set_index_metadata("last_index_started_at", datetime.now(timezone.utc).isoformat())
+        self.store.set_index_metadata("last_index_error", "")
         if not self.root.is_dir():
-            raise FileNotFoundError(f"document root does not exist: {self.root}")
+            error = f"document root does not exist: {self.root}"
+            self.store.set_index_metadata("last_index_error", error)
+            raise FileNotFoundError(error)
         with open(self.lock_path, "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            return self._scan()
+            try:
+                result = self._scan()
+                self.store.set_index_metadata("last_index_completed_at", datetime.now(timezone.utc).isoformat())
+                return result
+            except Exception as exc:
+                self.store.set_index_metadata("last_index_error", str(exc))
+                raise
 
     def _scan(self):
         stats, seen = ScanStats(), set()

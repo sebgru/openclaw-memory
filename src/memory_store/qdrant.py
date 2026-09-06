@@ -76,3 +76,31 @@ class QdrantStore:
             {"id": str(x["id"]), **x.get("payload", {}), "score": x.get("score", 0.0)}
             for x in result.get("result", [])
         ]
+
+    def point_count(self):
+        result = self._request("POST", "/collections/" + quote(self.collection, safe="") + "/points/count", {"exact": True})
+        return int(result.get("result", {}).get("count", 0))
+
+    def point_ids(self, ids):
+        if not ids:
+            return set()
+        result = self._request("POST", "/collections/" + quote(self.collection, safe="") + "/points", {
+            "ids": [str(uuid.uuid5(uuid.NAMESPACE_URL, cid)) for cid in ids],
+            "with_payload": False,
+            "with_vector": False,
+        })
+        return {str(item["id"]) for item in result.get("result", [])}
+
+    def diagnostics(self, store):
+        chunks = [row[0] for row in store.db.execute("SELECT id FROM chunks")]
+        present = self.point_ids(chunks)
+        expected = {str(uuid.uuid5(uuid.NAMESPACE_URL, cid)) for cid in chunks}
+        return {"points": self.point_count(), "chunks": len(chunks), "missing_vectors": len(expected - present)}
+
+    def reconcile_missing(self, store, embed, limit=1000):
+        rows = store.db.execute("SELECT id, path, heading, body, line FROM chunks").fetchall()
+        present = self.point_ids([row[0] for row in rows])
+        missing = [row for row in rows if str(uuid.uuid5(uuid.NAMESPACE_URL, row[0])) not in present]
+        selected = missing[:limit]
+        self.upsert([(r[0], r[1], r[2], r[3], r[4]) for r in selected], embed)
+        return {"reconciled": len(selected), "remaining": len(missing) - len(selected)}
