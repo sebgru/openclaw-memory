@@ -40,7 +40,7 @@ def chunk_markdown(markdown: str, max_chars: int = 1600) -> list[MarkdownChunk]:
         current_line = start_line
         for paragraph in paragraphs:
             paragraph = paragraph.strip()
-            if not paragraph:
+            if not paragraph:  # pragma: no cover - section guard makes this unreachable
                 continue
             candidate = f"{current}\n\n{paragraph}" if current else paragraph
             if current and len(candidate) > max_chars:

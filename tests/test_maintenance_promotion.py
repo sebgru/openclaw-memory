@@ -112,6 +112,30 @@ class PromotionTests(unittest.TestCase):
                 self.root, "memory/review-candidates/missing.md", "memory/knowledge/f.md", "human"
             )
 
+    def test_candidates_skip_symlinks(self):
+        link = self.candidate.parent / "link.md"
+        link.symlink_to(self.candidate)
+        self.assertEqual(
+            [item["path"] for item in candidates(self.root)],
+            ["memory/review-candidates/fact.md"],
+        )
+
+    def test_candidates_marks_oversized_files_ineligible(self):
+        oversized = self.candidate.parent / "big.md"
+        oversized.write_text("x" * (256 * 1024 + 1))
+        result = {item["path"]: item for item in candidates(self.root)}
+        self.assertEqual(result["memory/review-candidates/big.md"]["eligible"], "false")
+        self.assertEqual(
+            result["memory/review-candidates/big.md"]["reason"], "candidate exceeds 256 KiB"
+        )
+
+    def test_promotion_rejects_ineligible_candidate(self):
+        self.candidate.write_text("x" * (256 * 1024 + 1))
+        with self.assertRaises(PromotionError):
+            promote(
+                self.root, "memory/review-candidates/fact.md", "memory/knowledge/fact.md", "human"
+            )
+
     def test_promotion_rejects_non_markdown_destination(self):
         with self.assertRaises(PromotionError):
             promote(
@@ -129,6 +153,10 @@ class PromotionTests(unittest.TestCase):
         chunks = chunk_markdown(huge, max_chars=100)
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(c.text) <= 100 for c in chunks))
+
+    def test_chunker_skips_blank_paragraphs(self):
+        chunks = chunk_markdown("# H\n\nfirst\n\n\n   \n\nsecond")
+        self.assertEqual([c.text for c in chunks], ["first\n\nsecond"])
 
     def test_chunker_handles_oversized_paragraph_mid_section(self):
         first = "word " * 60
