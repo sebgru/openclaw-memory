@@ -42,11 +42,13 @@ ARCHIVE_ROOT=/data/workspace/memory/archive
 5. Run incremental indexing. Deterministic chunk identifiers replace only changed material.
 
 The service exposes this workflow without making a judgment: `GET
-/promotion/candidates` lists Markdown candidates, and `POST /promotion/promote`
-requires the caller to name the candidate, a `memory/knowledge/*.md`
-destination, and a non-empty `approved_by` value. Promotion is an explicit
-human action, writes atomically, appends provenance to the promoted file, and
-retains the candidate as an audit record. There is no background or automatic
+/promotion/candidates` lists Markdown candidates with size and eligibility
+(empty or oversized candidates are flagged ineligible), and `POST
+/promotion/promote` requires the caller to name the candidate, a
+`memory/knowledge/*.md` destination, and a non-empty `approved_by` value.
+Promotion is an explicit human action, writes atomically, refuses to overwrite
+an existing destination, appends provenance to the promoted file, and retains
+the candidate as an audit record. There is no background or automatic
 promotion path.
 
 Promotion is intentionally a human decision. Normal indexing and search never edit authoritative Markdown; only the explicit promotion action writes the selected destination.

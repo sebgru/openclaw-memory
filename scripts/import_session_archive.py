@@ -13,7 +13,6 @@ import json
 import re
 from pathlib import Path
 
-
 SOURCE_LINE = re.compile(r"^\[[^\]]+#L\d+\]")
 
 
@@ -42,7 +41,7 @@ def import_corpus(source_root: Path, destination: Path, manifest_path: Path) -> 
                 }
             )
             continue
-        content = "# Session corpus {0}\n\n{1}\n".format(source.stem, "\n".join(lines))
+        content = "# Session corpus {}\n\n{}\n".format(source.stem, "\n".join(lines))
         target.write_text(content, encoding="utf-8")
         imported += 1
         records.append(
@@ -65,4 +64,6 @@ if __name__ == "__main__":
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     args = parser.parse_args()
-    print(json.dumps(import_corpus(args.source_root, args.destination, args.manifest), sort_keys=True))
+    print(
+        json.dumps(import_corpus(args.source_root, args.destination, args.manifest), sort_keys=True)
+    )
