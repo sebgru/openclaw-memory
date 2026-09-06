@@ -36,6 +36,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(Indexer(self.root, self.store).scan().removed, 1)
         self.assertFalse(self.store.search("hello"))
 
+    def test_index_status_records_freshness_and_errors(self):
+        file = self.root / "a.md"
+        file.write_text("# Topic\nhello world")
+        Indexer(self.root, self.store).scan()
+        status = self.store.status()["index"]
+        self.assertTrue(status["last_index_started_at"])
+        self.assertTrue(status["last_index_completed_at"])
+        self.assertEqual(status["last_index_error"], "")
+        with self.assertRaises(FileNotFoundError):
+            Indexer(self.root / "missing", self.store).scan()
+        self.assertIn("does not exist", self.store.status()["index"]["last_index_error"])
+
     def test_missing_root(self):
         with self.assertRaises(FileNotFoundError):
             Indexer(self.root / "missing", self.store).scan()

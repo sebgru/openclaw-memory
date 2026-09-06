@@ -52,6 +52,7 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
   `semantic_score` contributions for diagnostics.
 - `GET /healthz` returns service health.
 - `POST /archive/index`, `GET /archive/search`, and `GET /archive/status` operate on the separately configured historical archive.
+- `POST /reconcile` (or `/archive/reconcile`) repairs missing Qdrant points only when sent with `{"confirm":true}`; it is operator-controlled, locked, and never deletes or replaces existing points.
 - `GET /promotion/candidates` lists queued candidates with `bytes` and an `eligible` flag (files over 256 KiB or empty are ineligible, with a `reason`); `POST /promotion/promote` promotes one only with an explicit `approved_by` value and never overwrites an existing destination.
 
 SQLite maintenance is setup-independent: `python -m memory_store.maintenance backup --source memory.db --destination backups/memory.db` creates a consistent backup and verifies both the backup and a temporary restore. Schedule this command externally if desired; the service never promotes candidates automatically.
@@ -72,7 +73,7 @@ Only Markdown files are read. Symlinks are ignored and file paths in results are
 
 The service logs to stdout: startup configuration, HTTP access lines, search outcomes (query, limit, result count, latency), index outcomes (added/changed/removed/unchanged counts), per-file indexer decisions, and errors with tracebacks. `LOG_LEVEL` controls verbosity (`INFO` by default; set `DEBUG` to also log unchanged files during indexing). Semantic-search failures that fall back to FTS5 are logged as warnings.
 
-When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale, and rerunning `POST /index` retries changed files. Search falls back to SQLite FTS5 during a Qdrant or embedding outage.
+When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale. `/status` and `/archive/status` expose index timestamps/errors and point/chunk parity diagnostics. Use the explicit, locked reconciliation endpoint to add missing points; it never deletes points. Search falls back to SQLite FTS5 during a Qdrant or embedding outage.
 
 ## CI/CD
 

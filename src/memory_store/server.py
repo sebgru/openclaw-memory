@@ -1,4 +1,5 @@
 import json
+import fcntl
 import logging
 import os
 import time
@@ -99,6 +100,10 @@ def indexer(root, selected_store, selected_vector_store, includes=("**/*.md",), 
     )
 
 
+def vector_status(selected_store, selected_vector_store):
+    return selected_vector_store.diagnostics(selected_store) if selected_vector_store else None
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, code, payload):
         data = json.dumps(payload).encode()
@@ -113,21 +118,29 @@ class Handler(BaseHTTPRequestHandler):
         parsed, params = urlparse(self.path), parse_qs(urlparse(self.path).query)
         if parsed.path in ("/healthz", "/status"):
             integrity = verify_database(store.db.execute("PRAGMA database_list").fetchone()[2])
+            status = {"status": integrity["status"], "backend": "sqlite+qdrant" if vector_store else "sqlite", "database": integrity, **store.status()}
+            if vector_store:
+                try:
+                    status["vectors"] = vector_status(store, vector_store)
+                except Exception as exc:
+                    status["vectors"] = {"status": "error", "error": str(exc)}
             return self.send_json(
                 200,
-                {
-                    "status": integrity["status"],
-                    "backend": "sqlite+qdrant" if vector_store else "sqlite",
-                    "database": integrity,
-                    **store.status(),
-                },
+                status,
             )
         if parsed.path == "/promotion/candidates":
             return self.send_json(200, {"candidates": candidates(ROOT)})
         if parsed.path == "/archive/status":
             if not archive_store:
                 return self.send_json(404, {"error": "archive is not configured"})
-            return self.send_json(200, {"status": "ok", **archive_store.status()})
+            integrity = verify_database(archive_store.db.execute("PRAGMA database_list").fetchone()[2])
+            status = {"status": integrity["status"], "database": integrity, **archive_store.status()}
+            if archive_vector_store:
+                try:
+                    status["vectors"] = vector_status(archive_store, archive_vector_store)
+                except Exception as exc:
+                    status["vectors"] = {"status": "error", "error": str(exc)}
+            return self.send_json(200, status)
         if parsed.path in ("/search", "/archive/search"):
             is_archive = parsed.path.startswith("/archive/")
             if is_archive and not archive_store:
@@ -165,6 +178,27 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path in ("/reconcile", "/archive/reconcile"):
+            is_archive = self.path.startswith("/archive/")
+            selected_store = archive_store if is_archive else store
+            selected_vectors = archive_vector_store if is_archive else vector_store
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                if payload.get("confirm") is not True:
+                    return self.send_json(400, {"error": "reconciliation requires confirm=true"})
+                if not selected_store or not selected_vectors:
+                    return self.send_json(404, {"error": "vector backend is not configured"})
+                db_path = selected_store.db.execute("PRAGMA database_list").fetchone()[2]
+                with open(db_path + ".vector-reconcile.lock", "w") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    limit = int(payload.get("limit", 1000))
+                    if not 1 <= limit <= 10000:
+                        return self.send_json(400, {"error": "limit must be between 1 and 10000"})
+                    result = selected_vectors.reconcile_missing(selected_store, embedder.embed, limit)
+                return self.send_json(200, result)
+            except (ValueError, OSError) as exc:
+                return self.send_json(400, {"error": str(exc)})
         if self.path == "/promotion/promote":
             try:
                 length = int(self.headers.get("Content-Length", "0"))

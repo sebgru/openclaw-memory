@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .embeddings import hash_embedding
@@ -13,12 +14,20 @@ class SQLiteStore:
         CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, digest TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS chunks(id TEXT PRIMARY KEY, path TEXT NOT NULL, heading TEXT, body TEXT NOT NULL, line INTEGER, vector BLOB);
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(id UNINDEXED, path, heading, body);
+        CREATE TABLE IF NOT EXISTS index_metadata(key TEXT PRIMARY KEY, value TEXT);
         """)
         self.db.commit()
 
     def file_digest(self, path):
         row = self.db.execute("SELECT digest FROM files WHERE path=?", (path,)).fetchone()
         return row[0] if row else None
+
+    def set_index_metadata(self, key, value):
+        self.db.execute("INSERT OR REPLACE INTO index_metadata VALUES (?, ?)", (key, value))
+        self.db.commit()
+
+    def index_metadata(self):
+        return {row[0]: row[1] for row in self.db.execute("SELECT key, value FROM index_metadata")}
 
     def upsert_file(self, path, digest, chunks, embed=None):
         self.delete_file(path, commit=False)
@@ -74,7 +83,15 @@ class SQLiteStore:
         return [float(x) for x in row[0].split(",")] if row else None
 
     def status(self):
+        metadata = self.index_metadata()
+        age = None
+        if metadata.get("last_index_completed_at"):
+            try:
+                age = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(metadata["last_index_completed_at"])).total_seconds())
+            except ValueError:
+                pass
         return {
             "files": self.db.execute("SELECT count(*) FROM files").fetchone()[0],
             "chunks": self.db.execute("SELECT count(*) FROM chunks").fetchone()[0],
+            "index": {**metadata, "age_seconds": age},
         }
