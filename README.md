@@ -52,7 +52,8 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
   `semantic_score` contributions for diagnostics.
 - `GET /healthz` returns service health.
 - `POST /archive/index`, `GET /archive/search`, and `GET /archive/status` operate on the separately configured historical archive.
-- `POST /reconcile` (or `/archive/reconcile`) repairs missing Qdrant points only when sent with `{"confirm":true}`; it is operator-controlled, locked, and never deletes or replaces existing points.
+- `GET /status` (and `/healthz`) report SQLite integrity, index freshness (`last_index_started_at`, `last_index_completed_at`, `last_index_error`, `age_seconds`), and — when Qdrant is configured — vector parity diagnostics (`points`, `chunks`, `missing_vectors`).
+- `POST /reconcile` (or `/archive/reconcile`) repairs missing Qdrant points only when sent with `{"confirm":true}`; it is operator-controlled, locked, and never deletes or replaces existing points. An optional `limit` (1–10000, default 1000) bounds how many missing points are upserted per call; the response reports `reconciled` and `remaining` counts.
 - `GET /promotion/candidates` lists queued candidates with `bytes` and an `eligible` flag (files over 256 KiB or empty are ineligible, with a `reason`); `POST /promotion/promote` promotes one only with an explicit `approved_by` value and never overwrites an existing destination.
 
 SQLite maintenance is setup-independent: `python -m memory_store.maintenance backup --source memory.db --destination backups/memory.db` creates a consistent backup and verifies both the backup and a temporary restore. Schedule this command externally if desired; the service never promotes candidates automatically.
@@ -74,6 +75,14 @@ Only Markdown files are read. Symlinks are ignored and file paths in results are
 The service logs to stdout: startup configuration, HTTP access lines, search outcomes (query, limit, result count, latency), index outcomes (added/changed/removed/unchanged counts), per-file indexer decisions, and errors with tracebacks. `LOG_LEVEL` controls verbosity (`INFO` by default; set `DEBUG` to also log unchanged files during indexing). Semantic-search failures that fall back to FTS5 are logged as warnings.
 
 When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale. `/status` and `/archive/status` expose index timestamps/errors and point/chunk parity diagnostics. Use the explicit, locked reconciliation endpoint to add missing points; it never deletes points. Search falls back to SQLite FTS5 during a Qdrant or embedding outage.
+
+### Reconciliation workflow
+
+1. Check parity: `curl http://localhost:8080/status | jq .vectors` — `missing_vectors > 0` means some indexed chunks lack Qdrant points.
+2. Repair: `curl -X POST http://localhost:8080/reconcile -d '{"confirm":true}'` — upserts only missing points (deterministic UUIDs derived from chunk IDs), never deletes or overwrites.
+3. Re-check: `missing_vectors` should now be `0`.
+
+The endpoint takes a file lock (`<db>.vector-reconcile.lock`), so concurrent calls serialize. Do not schedule it automatically; run it only after diagnostics report missing vectors.
 
 ## CI/CD
 

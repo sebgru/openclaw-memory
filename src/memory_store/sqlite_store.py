@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .embeddings import hash_embedding
@@ -87,7 +87,13 @@ class SQLiteStore:
         age = None
         if metadata.get("last_index_completed_at"):
             try:
-                age = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(metadata["last_index_completed_at"])).total_seconds())
+                age = max(
+                    0.0,
+                    (
+                        datetime.now(UTC)
+                        - datetime.fromisoformat(metadata["last_index_completed_at"])
+                    ).total_seconds(),
+                )
             except ValueError:
                 pass
         return {

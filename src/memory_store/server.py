@@ -1,5 +1,5 @@
-import json
 import fcntl
+import json
 import logging
 import os
 import time
@@ -118,7 +118,12 @@ class Handler(BaseHTTPRequestHandler):
         parsed, params = urlparse(self.path), parse_qs(urlparse(self.path).query)
         if parsed.path in ("/healthz", "/status"):
             integrity = verify_database(store.db.execute("PRAGMA database_list").fetchone()[2])
-            status = {"status": integrity["status"], "backend": "sqlite+qdrant" if vector_store else "sqlite", "database": integrity, **store.status()}
+            status = {
+                "status": integrity["status"],
+                "backend": "sqlite+qdrant" if vector_store else "sqlite",
+                "database": integrity,
+                **store.status(),
+            }
             if vector_store:
                 try:
                     status["vectors"] = vector_status(store, vector_store)
@@ -133,8 +138,14 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/archive/status":
             if not archive_store:
                 return self.send_json(404, {"error": "archive is not configured"})
-            integrity = verify_database(archive_store.db.execute("PRAGMA database_list").fetchone()[2])
-            status = {"status": integrity["status"], "database": integrity, **archive_store.status()}
+            integrity = verify_database(
+                archive_store.db.execute("PRAGMA database_list").fetchone()[2]
+            )
+            status = {
+                "status": integrity["status"],
+                "database": integrity,
+                **archive_store.status(),
+            }
             if archive_vector_store:
                 try:
                     status["vectors"] = vector_status(archive_store, archive_vector_store)
@@ -195,7 +206,9 @@ class Handler(BaseHTTPRequestHandler):
                     limit = int(payload.get("limit", 1000))
                     if not 1 <= limit <= 10000:
                         return self.send_json(400, {"error": "limit must be between 1 and 10000"})
-                    result = selected_vectors.reconcile_missing(selected_store, embedder.embed, limit)
+                    result = selected_vectors.reconcile_missing(
+                        selected_store, embedder.embed, limit
+                    )
                 return self.send_json(200, result)
             except (ValueError, OSError) as exc:
                 return self.send_json(400, {"error": str(exc)})

@@ -2,8 +2,8 @@ import fcntl
 import fnmatch
 import hashlib
 import logging
-from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .chunker import chunk_markdown
@@ -47,7 +47,7 @@ class Indexer:
         self.lock_path = db_path + ".lock" if db_path else str(self.root / ".index.lock")
 
     def scan(self):
-        self.store.set_index_metadata("last_index_started_at", datetime.now(timezone.utc).isoformat())
+        self.store.set_index_metadata("last_index_started_at", datetime.now(UTC).isoformat())
         self.store.set_index_metadata("last_index_error", "")
         if not self.root.is_dir():
             error = f"document root does not exist: {self.root}"
@@ -57,7 +57,9 @@ class Indexer:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
                 result = self._scan()
-                self.store.set_index_metadata("last_index_completed_at", datetime.now(timezone.utc).isoformat())
+                self.store.set_index_metadata(
+                    "last_index_completed_at", datetime.now(UTC).isoformat()
+                )
                 return result
             except Exception as exc:
                 self.store.set_index_metadata("last_index_error", str(exc))
