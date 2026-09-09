@@ -14,3 +14,4 @@ build/
 *.sqlite
 *.sqlite3
 .env
+*.vector-reconcile.lock

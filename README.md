@@ -12,6 +12,8 @@ A standalone, public-safe Markdown indexing service. It scans a directory, chunk
 docker compose up --build
 curl -X POST http://localhost:8080/index
 curl 'http://localhost:8080/search?q=release%20notes&limit=5'
+# Search across the main index and (when configured) the archive:
+curl 'http://localhost:8080/unified/search?q=release%20notes&limit=5&scope=all'
 ```
 
 Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PATTERNS`, `EXCLUDE_PATTERNS`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, `LOG_LEVEL`, and `PORT`. No credentials or deployment-specific paths are required.
@@ -48,6 +50,13 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 
 - `POST /index` scans and incrementally indexes Markdown files; response includes added, changed, removed, and unchanged counts.
 - `GET /search?q=...&limit=10` returns ranked results combining FTS5 and vector scores.
+- `GET /unified/search?q=...&limit=10&scope=all` searches the main index and,
+  when configured, the explicit archive index. `scope` may be `all`, `main`, or
+  `archive`. Results carry stable `source` labels (`memory`, `artifact`,
+  `session`, or `archive`), a backend-independent result ID, and separate
+  lexical/semantic score contributions. If one selected backend fails, the
+  response remains successful with a `warnings` array describing the partial
+  result set.
 - Search results include the combined `score` plus separate `lexical_score` and
   `semantic_score` contributions for diagnostics.
 - Results under `outputs/` are labeled with `source: "artifact"`; register

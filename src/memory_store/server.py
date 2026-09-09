@@ -1,4 +1,5 @@
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -116,6 +117,79 @@ def annotate_result(result):
     return {**result, "source": source}
 
 
+def unified_source(result, archive=False):
+    """Return the stable corpus label for a unified-search result."""
+    if archive:
+        return "archive"
+    path = str(result.get("path", ""))
+    if path.startswith(("sessions/", "session/")) or "/sessions/" in path:
+        return "session"
+    if path == "outputs/INDEX.md" or path.startswith("outputs/"):
+        return "artifact"
+    return "memory"
+
+
+def unified_result_id(result, source):
+    """Build an ID independent of SQLite or Qdrant's backend-specific IDs."""
+    identity = "\0".join(
+        (
+            source,
+            str(result.get("path", "")),
+            str(result.get("line", "")),
+            str(result.get("heading", "")),
+            str(result.get("text", "")),
+        )
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def unified_search(query, limit, scope="all"):
+    """Search the configured main/archive indexes and merge partial results."""
+    if scope not in {"all", "main", "archive"}:
+        raise ValueError("scope must be one of all, main, archive")
+    if scope == "archive" and not archive_store:
+        raise LookupError("archive is not configured")
+
+    warnings = []
+    merged: dict[str, dict] = {}
+    backends = []
+    if scope in {"all", "main"}:
+        backends.append(("main", store, vector_store, False))
+    if scope in {"all", "archive"}:
+        if archive_store:
+            backends.append(("archive", archive_store, archive_vector_store, True))
+        else:
+            warnings.append("archive: not configured")
+
+    for name, selected_store, selected_vector_store, is_archive in backends:
+        try:
+            rows = hybrid_search(query, limit * 3, selected_store, selected_vector_store)
+        except Exception as exc:
+            logger.warning("unified %s search unavailable: %s", name, exc)
+            warnings.append(f"{name}: search backend unavailable")
+            continue
+        for row in rows:
+            source = unified_source(row, archive=is_archive)
+            result_id = unified_result_id(row, source)
+            item = merged.setdefault(
+                result_id,
+                {
+                    **row,
+                    "id": result_id,
+                    "source": source,
+                    "score": 0,
+                    "lexical_score": 0,
+                    "semantic_score": 0,
+                },
+            )
+            item["score"] += row.get("score", 0)
+            item["lexical_score"] += row.get("lexical_score", 0)
+            item["semantic_score"] += row.get("semantic_score", 0)
+
+    results = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
+    return results[:limit], warnings
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, code, payload):
         data = json.dumps(payload).encode()
@@ -198,6 +272,36 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(
                     503, {"error": "search backend unavailable", "detail": str(exc)}
                 )
+        if parsed.path == "/unified/search":
+            query = params.get("q", [""])[0]
+            scope = params.get("scope", ["all"])[0]
+            try:
+                limit = int(params.get("limit", [10])[0])
+            except ValueError:
+                return self.send_json(400, {"error": "limit must be an integer"})
+            if not query.strip() or not 1 <= limit <= 100:
+                return self.send_json(
+                    400, {"error": "q is required and limit must be between 1 and 100"}
+                )
+            if scope not in {"all", "main", "archive"}:
+                return self.send_json(400, {"error": "scope must be one of all, main, archive"})
+            try:
+                results, warnings = unified_search(query, limit, scope)
+            except LookupError as exc:
+                return self.send_json(404, {"error": str(exc)})
+            logger.info(
+                "/unified/search q=%r scope=%s limit=%d results=%d warnings=%d took=%.1fms",
+                query,
+                scope,
+                limit,
+                len(results),
+                len(warnings),
+                (time.monotonic() - started) * 1000,
+            )
+            payload = {"results": results}
+            if warnings:
+                payload["warnings"] = warnings
+            return self.send_json(200, payload)
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
