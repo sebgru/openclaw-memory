@@ -24,7 +24,9 @@ def patterns(name, default):
 
 
 INCLUDE_PATTERNS = patterns("INCLUDE_PATTERNS", "**/*.md")
-EXCLUDE_PATTERNS = patterns("EXCLUDE_PATTERNS", "**/review-candidates/**,**/archive/**")
+EXCLUDE_PATTERNS = patterns(
+    "EXCLUDE_PATTERNS", "**/review-candidates/**,**/archive/**,exchange/**,**/exchange/**"
+)
 ARCHIVE_ROOT = os.getenv("ARCHIVE_ROOT")
 embedder = EmbeddingClient(os.getenv("EMBEDDING_URL"), os.getenv("EMBEDDING_MODEL", "default"), DIM)
 store = SQLiteStore(os.getenv("SQLITE_PATH", "memory.db"), DIM)
@@ -86,7 +88,10 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         )
         item["score"] += score
         item["semantic_score"] += score
-    return sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
+    return [
+        annotate_result(item)
+        for item in sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
+    ]
 
 
 def indexer(root, selected_store, selected_vector_store, includes=("**/*.md",), excludes=()):
@@ -102,6 +107,13 @@ def indexer(root, selected_store, selected_vector_store, includes=("**/*.md",), 
 
 def vector_status(selected_store, selected_vector_store):
     return selected_vector_store.diagnostics(selected_store) if selected_vector_store else None
+
+
+def annotate_result(result):
+    """Attach a source label without reading the artifact itself."""
+    path = str(result.get("path", ""))
+    source = "artifact" if path == "outputs/INDEX.md" or path.startswith("outputs/") else "memory"
+    return {**result, "source": source}
 
 
 class Handler(BaseHTTPRequestHandler):

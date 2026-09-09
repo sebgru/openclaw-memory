@@ -44,6 +44,17 @@ class ApiTests(unittest.TestCase):
         finally:
             server.store.search = original
 
+    def test_search_labels_output_registry_as_artifact(self):
+        original = server.store.search
+        try:
+            server.store.search = lambda query, limit: [
+                {"id": "one", "text": "artifact", "path": "outputs/INDEX.md", "score": 2.0}
+            ]
+            result = server.hybrid_search("artifact", 1, server.store, None)[0]
+            self.assertEqual(result["source"], "artifact")
+        finally:
+            server.store.search = original
+
 
 if __name__ == "__main__":
     unittest.main()

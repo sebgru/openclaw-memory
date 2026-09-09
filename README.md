@@ -22,7 +22,7 @@ For a tiered memory layout, including a separate historical session archive and 
 | --- | --- | --- |
 | `DOCUMENT_ROOT` | `./documents` | Directory scanned for Markdown by `POST /index` |
 | `INCLUDE_PATTERNS` | `**/*.md` | Comma-separated glob patterns of files to index |
-| `EXCLUDE_PATTERNS` | `**/review-candidates/**,**/archive/**` | Comma-separated glob patterns of files to skip |
+| `EXCLUDE_PATTERNS` | `**/review-candidates/**,**/archive/**,exchange/**,**/exchange/**` | Comma-separated glob patterns of files to skip |
 | `SQLITE_PATH` | `memory.db` | SQLite database (FTS5) for indexed state |
 | `QDRANT_URL` | unset | Enables vector search via Qdrant when set |
 | `QDRANT_COLLECTION` | `memory` | Qdrant collection for the main index |
@@ -50,6 +50,9 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 - `GET /search?q=...&limit=10` returns ranked results combining FTS5 and vector scores.
 - Search results include the combined `score` plus separate `lexical_score` and
   `semantic_score` contributions for diagnostics.
+- Results under `outputs/` are labeled with `source: "artifact"`; register
+  generated files in `outputs/INDEX.md` so their metadata is searchable. The
+  generated files themselves are not parsed as memory.
 - `GET /healthz` returns service health.
 - `POST /archive/index`, `GET /archive/search`, and `GET /archive/status` operate on the separately configured historical archive.
 - `GET /status` (and `/healthz`) report SQLite integrity, index freshness (`last_index_started_at`, `last_index_completed_at`, `last_index_error`, `age_seconds`), and — when Qdrant is configured — vector parity diagnostics (`points`, `chunks`, `missing_vectors`).
@@ -68,7 +71,8 @@ To bootstrap an existing session corpus into the archive, use
 corpus format (each line starting with `[<jsonl-path>#L<n>]`), never
 overwrites existing destination files, and writes a SHA-256 manifest.
 
-Only Markdown files are read. Symlinks are ignored and file paths in results are relative to the configured document root.
+Only Markdown files are read. Symlinks are ignored, `exchange/` is excluded by
+default, and file paths in results are relative to the configured document root.
 
 ## Logging
 
