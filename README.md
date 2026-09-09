@@ -48,6 +48,13 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 
 - `POST /index` scans and incrementally indexes Markdown files; response includes added, changed, removed, and unchanged counts.
 - `GET /search?q=...&limit=10` returns ranked results combining FTS5 and vector scores.
+- `GET /unified/search?q=...&limit=10&scope=all` searches the main index and,
+  when configured, the explicit archive index. `scope` may be `all`, `main`, or
+  `archive`. Results carry stable `source` labels (`memory`, `artifact`,
+  `session`, or `archive`), a backend-independent result ID, and separate
+  lexical/semantic score contributions. If one selected backend fails, the
+  response remains successful with a `warnings` array describing the partial
+  result set.
 - Search results include the combined `score` plus separate `lexical_score` and
   `semantic_score` contributions for diagnostics.
 - Results under `outputs/` are labeled with `source: "artifact"`; register
