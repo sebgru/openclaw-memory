@@ -72,6 +72,20 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(self.store.search("authoritative"))
         self.assertIsNone(self.store.file_digest("OTHER.md"))
 
+    def test_exchange_can_be_excluded_from_source_corpus(self):
+        (self.root / "outputs").mkdir()
+        (self.root / "outputs" / "INDEX.md").write_text("# Outputs\nartifact registry")
+        (self.root / "exchange").mkdir()
+        (self.root / "exchange" / "transfer.md").write_text("private transfer")
+        stats = Indexer(
+            self.root,
+            self.store,
+            exclude_patterns=("exchange/**", "**/exchange/**"),
+        ).scan()
+        self.assertEqual(stats.added, 1)
+        self.assertTrue(self.store.search("artifact"))
+        self.assertFalse(self.store.search("transfer"))
+
 
 if __name__ == "__main__":
     unittest.main()
