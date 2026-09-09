@@ -208,6 +208,18 @@ class ReconcileEndpointTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("limit", body["error"])
 
+    def test_reconcile_limit_value_error_returns_400(self):
+        original = server.vector_store
+        server.vector_store = object()
+        try:
+            status, body = self.request(
+                "POST", "/reconcile", json.dumps({"confirm": True, "limit": "abc"})
+            )
+        finally:
+            server.vector_store = original
+        self.assertEqual(status, 400)
+        self.assertIn("invalid literal", body["error"])
+
     def test_reconcile_success(self):
         class FakeVectors:
             def reconcile_missing(self, store, embed, limit):
