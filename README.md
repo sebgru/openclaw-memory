@@ -12,6 +12,8 @@ A standalone, public-safe Markdown indexing service. It scans a directory, chunk
 docker compose up --build
 curl -X POST http://localhost:8080/index
 curl 'http://localhost:8080/search?q=release%20notes&limit=5'
+# Search across the main index and (when configured) the archive:
+curl 'http://localhost:8080/unified/search?q=release%20notes&limit=5&scope=all'
 ```
 
 Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PATTERNS`, `EXCLUDE_PATTERNS`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, `LOG_LEVEL`, and `PORT`. No credentials or deployment-specific paths are required.

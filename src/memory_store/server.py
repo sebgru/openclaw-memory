@@ -151,7 +151,7 @@ def unified_search(query, limit, scope="all"):
         raise LookupError("archive is not configured")
 
     warnings = []
-    merged = {}
+    merged: dict[str, dict] = {}
     backends = []
     if scope in {"all", "main"}:
         backends.append(("main", store, vector_store, False))
