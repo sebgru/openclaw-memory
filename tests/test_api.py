@@ -202,6 +202,66 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(server.unified_source({"path": "notes/idea.md"}), "memory")
         self.assertEqual(server.unified_source({"path": "anything.md"}, archive=True), "archive")
 
+    def test_unified_search_all_scope_without_archive_warns(self):
+        original_hybrid = server.hybrid_search
+        original_archive = server.archive_store
+        try:
+            server.archive_store = None
+
+            def fake_hybrid(query, limit, selected_store, selected_vector_store):
+                return [
+                    {
+                        "id": "one",
+                        "path": "notes/idea.md",
+                        "heading": "Idea",
+                        "text": "memory fact",
+                        "line": 2,
+                        "score": 0.5,
+                        "lexical_score": 0.5,
+                        "semantic_score": 0,
+                    }
+                ]
+
+            server.hybrid_search = fake_hybrid
+            results, warnings = server.unified_search("fact", 10, "all")
+            self.assertEqual(warnings, ["archive: not configured"])
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["source"], "memory")
+        finally:
+            server.hybrid_search = original_hybrid
+            server.archive_store = original_archive
+
+    def test_unified_search_archive_backend_failure_continues(self):
+        original_hybrid = server.hybrid_search
+        original_archive = server.archive_store
+        try:
+            server.archive_store = object()
+
+            def fake_hybrid(query, limit, selected_store, selected_vector_store):
+                if selected_store is server.store:
+                    return [
+                        {
+                            "id": "one",
+                            "path": "notes/idea.md",
+                            "heading": "Idea",
+                            "text": "memory fact",
+                            "line": 2,
+                            "score": 0.5,
+                            "lexical_score": 0.5,
+                            "semantic_score": 0,
+                        }
+                    ]
+                raise OSError("archive unavailable")
+
+            server.hybrid_search = fake_hybrid
+            results, warnings = server.unified_search("fact", 10)
+            self.assertEqual(warnings, ["archive: search backend unavailable"])
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["source"], "memory")
+        finally:
+            server.hybrid_search = original_hybrid
+            server.archive_store = original_archive
+
     def test_unified_endpoint_validation_and_errors(self):
         self.assertEqual(self.request("/unified/search"), 400)
         self.assertEqual(self.request("/unified/search?q=fact&limit=no"), 400)

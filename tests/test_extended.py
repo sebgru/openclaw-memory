@@ -339,6 +339,20 @@ class ApiExtendedTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", body)
 
+    def test_post_index_value_error_returns_400(self):
+        original = server.indexer
+        try:
+
+            def bad_indexer(*args, **kwargs):
+                raise ValueError("bad include pattern")
+
+            server.indexer = bad_indexer
+            status, body = self.request("POST", "/index")
+        finally:
+            server.indexer = original
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "bad include pattern")
+
     def test_hybrid_search_without_vector_store(self):
         results = server.hybrid_search("quick", 5)
         self.assertIsInstance(results, list)
