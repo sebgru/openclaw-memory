@@ -47,9 +47,7 @@ DEFAULT_EXCLUDE_PATTERNS = ",".join(
         "**/exchange/**",
     )
 )
-EXCLUDE_PATTERNS = patterns(
-    "EXCLUDE_PATTERNS", DEFAULT_EXCLUDE_PATTERNS
-)
+EXCLUDE_PATTERNS = patterns("EXCLUDE_PATTERNS", DEFAULT_EXCLUDE_PATTERNS)
 ARCHIVE_ROOT = os.getenv("ARCHIVE_ROOT")
 embedder = EmbeddingClient(os.getenv("EMBEDDING_URL"), os.getenv("EMBEDDING_MODEL", "default"), DIM)
 store = SQLiteStore(os.getenv("SQLITE_PATH", "memory.db"), DIM)
@@ -144,9 +142,7 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         )
         item["score"] += score
         item["semantic_score"] += score
-        item["semantic_similarity"] = max(
-            item["semantic_similarity"], row.get("score", 0)
-        )
+        item["semantic_similarity"] = max(item["semantic_similarity"], row.get("score", 0))
     for item in merged.values():
         lexical_relevance = (
             max(0.0, item["lexical_evidence"]) / max_lexical_evidence

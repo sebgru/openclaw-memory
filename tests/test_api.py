@@ -163,19 +163,21 @@ class ApiTests(unittest.TestCase):
 
             def fake_hybrid(query, limit, selected_store, selected_vector_store):
                 path = "sessions/live.md" if selected_store is server.store else "copies/old.md"
-                return [{
-                    "id": path,
-                    "path": path,
-                    "heading": "Decision",
-                    "text": "  Keep   the approved architecture. ",
-                    "line": 4,
-                    "score": 0.3,
-                    "lexical_score": 0.1,
-                    "semantic_score": 0.2,
-                    "lexical_evidence": 2.0,
-                    "semantic_similarity": 0.8,
-                    "relevance_score": 0.8,
-                }]
+                return [
+                    {
+                        "id": path,
+                        "path": path,
+                        "heading": "Decision",
+                        "text": "  Keep   the approved architecture. ",
+                        "line": 4,
+                        "score": 0.3,
+                        "lexical_score": 0.1,
+                        "semantic_score": 0.2,
+                        "lexical_evidence": 2.0,
+                        "semantic_similarity": 0.8,
+                        "relevance_score": 0.8,
+                    }
+                ]
 
             server.hybrid_search = fake_hybrid
             results, warnings = server.unified_search("architecture", 10)

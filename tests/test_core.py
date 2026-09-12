@@ -106,7 +106,16 @@ class CoreTests(unittest.TestCase):
             path.write_text(content)
         Indexer(self.root, self.store, exclude_patterns=EXCLUDE_PATTERNS).scan()
         self.assertTrue(self.store.search("authoritative"))
-        for term in ("dream", "staged", "digest", "handoff", "health", "candidate", "archive", "exchange"):
+        for term in (
+            "dream",
+            "staged",
+            "digest",
+            "handoff",
+            "health",
+            "candidate",
+            "archive",
+            "exchange",
+        ):
             self.assertFalse(self.store.search(term), term)
 
     def test_hygiene_reconciliation_removes_previously_indexed_noise(self):
