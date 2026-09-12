@@ -25,9 +25,29 @@ def patterns(name, default):
 
 
 INCLUDE_PATTERNS = patterns("INCLUDE_PATTERNS", "**/*.md")
-EXCLUDE_PATTERNS = patterns(
-    "EXCLUDE_PATTERNS", "**/review-candidates/**,**/archive/**,exchange/**,**/exchange/**"
+DEFAULT_EXCLUDE_PATTERNS = ",".join(
+    (
+        "memory/dreaming/**",
+        "**/memory/dreaming/**",
+        "memory/.dreams/**",
+        "**/memory/.dreams/**",
+        "digests/**",
+        "**/digests/**",
+        "handoffs/**",
+        "**/handoffs/**",
+        "system-health/**",
+        "**/system-health/**",
+        "system-health*.md",
+        "**/system-health*.md",
+        "review-candidates/**",
+        "**/review-candidates/**",
+        "archive/**",
+        "**/archive/**",
+        "exchange/**",
+        "**/exchange/**",
+    )
 )
+EXCLUDE_PATTERNS = patterns("EXCLUDE_PATTERNS", DEFAULT_EXCLUDE_PATTERNS)
 ARCHIVE_ROOT = os.getenv("ARCHIVE_ROOT")
 embedder = EmbeddingClient(os.getenv("EMBEDDING_URL"), os.getenv("EMBEDDING_MODEL", "default"), DIM)
 store = SQLiteStore(os.getenv("SQLITE_PATH", "memory.db"), DIM)
@@ -53,6 +73,23 @@ archive_vector_store = (
 _DEFAULT_VECTOR = object()
 
 
+def env_float(name, default):
+    return float(os.getenv(name, str(default)))
+
+
+def env_int(name, default):
+    return int(os.getenv(name, str(default)))
+
+
+PROMPT_MIN_RELEVANCE = env_float("PROMPT_MIN_RELEVANCE", 0.2)
+PROMPT_SOURCE_QUOTAS = {
+    "memory": env_int("PROMPT_MEMORY_QUOTA", 3),
+    "artifact": env_int("PROMPT_ARTIFACT_QUOTA", 1),
+    "session": env_int("PROMPT_SESSION_QUOTA", 2),
+    "archive": env_int("PROMPT_ARCHIVE_QUOTA", 1),
+}
+
+
 def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFAULT_VECTOR):
     selected_store = selected_store or store
     selected_vector_store = (
@@ -69,26 +106,51 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         logger.warning("semantic search unavailable, falling back to FTS: %s", exc)
         semantic = []
     merged: dict = {}
+    max_lexical_evidence = max((max(0.0, row.get("score", 0.0)) for row in lexical), default=0)
     for rank, row in enumerate(lexical):
         score = 1 / (60 + rank + 1)
         item = merged.setdefault(
-            row["id"], {**row, "score": 0, "lexical_score": 0, "semantic_score": 0}
+            row["id"],
+            {
+                **row,
+                "score": 0,
+                "lexical_score": 0,
+                "semantic_score": 0,
+                "lexical_evidence": 0,
+                "semantic_similarity": 0,
+            },
         )
         item["score"] += score
         item["lexical_score"] += score
+        item["lexical_evidence"] = max(item["lexical_evidence"], row.get("score", 0))
     for rank, row in enumerate(semantic):
         score = 1 / (60 + rank + 1)
         item = merged.setdefault(
             row["id"],
             {
                 **row,
+                # Preserve the established ranking contract: a semantic-only
+                # result starts with Qdrant's raw similarity and then receives
+                # its reciprocal-rank contribution. New relevance fields below
+                # make thresholding independent from this legacy score.
                 "score": row.get("score", 0),
                 "lexical_score": 0,
                 "semantic_score": 0,
+                "lexical_evidence": 0,
+                "semantic_similarity": 0,
             },
         )
         item["score"] += score
         item["semantic_score"] += score
+        item["semantic_similarity"] = max(item["semantic_similarity"], row.get("score", 0))
+    for item in merged.values():
+        lexical_relevance = (
+            max(0.0, item["lexical_evidence"]) / max_lexical_evidence
+            if max_lexical_evidence
+            else 0.0
+        )
+        semantic_relevance = max(0.0, min(1.0, item["semantic_similarity"]))
+        item["relevance_score"] = max(lexical_relevance, semantic_relevance)
     return [
         annotate_result(item)
         for item in sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
@@ -131,6 +193,13 @@ def unified_source(result, archive=False):
 
 def unified_result_id(result, source):
     """Build an ID independent of SQLite or Qdrant's backend-specific IDs."""
+    normalized_text = " ".join(str(result.get("text", "")).casefold().split())
+    if source in {"session", "archive"}:
+        # Imported session corpora may contain the same transcript under several
+        # provenance paths. Content identity prevents duplicate copies from
+        # dominating recall while provenance remains attached below.
+        identity = "\0".join(("conversation", normalized_text))
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
     identity = "\0".join(
         (
             source,
@@ -143,10 +212,40 @@ def unified_result_id(result, source):
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
-def unified_search(query, limit, scope="all"):
+def result_provenance(result, source):
+    return {
+        "source": source,
+        "path": str(result.get("path", "")),
+        "heading": result.get("heading"),
+        "line": result.get("line"),
+    }
+
+
+def apply_search_profile(results, limit, profile):
+    if profile == "tool":
+        return results[:limit]
+    selected = []
+    counts = {source: 0 for source in PROMPT_SOURCE_QUOTAS}
+    for item in results:
+        source = item["source"]
+        if item.get("relevance_score", 0) < PROMPT_MIN_RELEVANCE:
+            continue
+        quota = PROMPT_SOURCE_QUOTAS.get(source, 0)
+        if counts.get(source, 0) >= quota:
+            continue
+        counts[source] = counts.get(source, 0) + 1
+        selected.append(item)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def unified_search(query, limit, scope="all", profile="tool"):
     """Search the configured main/archive indexes and merge partial results."""
     if scope not in {"all", "main", "archive"}:
         raise ValueError("scope must be one of all, main, archive")
+    if profile not in {"tool", "prompt"}:
+        raise ValueError("profile must be one of tool, prompt")
     if scope == "archive" and not archive_store:
         raise LookupError("archive is not configured")
 
@@ -180,14 +279,25 @@ def unified_search(query, limit, scope="all"):
                     "score": 0,
                     "lexical_score": 0,
                     "semantic_score": 0,
+                    "lexical_evidence": 0,
+                    "semantic_similarity": 0,
+                    "relevance_score": 0,
+                    "provenance": result_provenance(row, source),
+                    "alternate_provenance": [],
                 },
             )
-            item["score"] += row.get("score", 0)
-            item["lexical_score"] += row.get("lexical_score", 0)
-            item["semantic_score"] += row.get("semantic_score", 0)
+            provenance = result_provenance(row, source)
+            same_provenance = provenance == item["provenance"]
+            if not same_provenance and provenance not in item["alternate_provenance"]:
+                item["alternate_provenance"].append(provenance)
+            combine = (lambda old, new: old + new) if same_provenance else max
+            for field in ("score", "lexical_score", "semantic_score"):
+                item[field] = combine(item[field], row.get(field, 0))
+            for field in ("lexical_evidence", "semantic_similarity", "relevance_score"):
+                item[field] = max(item[field], row.get(field, 0))
 
     results = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
-    return results[:limit], warnings
+    return apply_search_profile(results, limit, profile), warnings
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -275,6 +385,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/unified/search":
             query = params.get("q", [""])[0]
             scope = params.get("scope", ["all"])[0]
+            profile = params.get("profile", ["tool"])[0]
             try:
                 limit = int(params.get("limit", [10])[0])
             except ValueError:
@@ -285,14 +396,23 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if scope not in {"all", "main", "archive"}:
                 return self.send_json(400, {"error": "scope must be one of all, main, archive"})
+            if profile not in {"tool", "prompt"}:
+                return self.send_json(400, {"error": "profile must be one of tool, prompt"})
             try:
-                results, warnings = unified_search(query, limit, scope)
+                # Keep the long-standing three-argument call shape for the
+                # default profile; callers and test doubles remain compatible.
+                results, warnings = (
+                    unified_search(query, limit, scope)
+                    if profile == "tool"
+                    else unified_search(query, limit, scope, profile)
+                )
             except LookupError as exc:
                 return self.send_json(404, {"error": str(exc)})
             logger.info(
-                "/unified/search q=%r scope=%s limit=%d results=%d warnings=%d took=%.1fms",
+                "/unified/search q=%r scope=%s profile=%s limit=%d results=%d warnings=%d took=%.1fms",
                 query,
                 scope,
+                profile,
                 limit,
                 len(results),
                 len(warnings),

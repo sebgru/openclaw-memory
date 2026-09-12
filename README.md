@@ -24,7 +24,7 @@ For a tiered memory layout, including a separate historical session archive and 
 | --- | --- | --- |
 | `DOCUMENT_ROOT` | `./documents` | Directory scanned for Markdown by `POST /index` |
 | `INCLUDE_PATTERNS` | `**/*.md` | Comma-separated glob patterns of files to index |
-| `EXCLUDE_PATTERNS` | `**/review-candidates/**,**/archive/**,exchange/**,**/exchange/**` | Comma-separated glob patterns of files to skip |
+| `EXCLUDE_PATTERNS` | workflow/archive exclusions described below | Comma-separated glob patterns of files to skip; setting this replaces the defaults |
 | `SQLITE_PATH` | `memory.db` | SQLite database (FTS5) for indexed state |
 | `QDRANT_URL` | unset | Enables vector search via Qdrant when set |
 | `QDRANT_COLLECTION` | `memory` | Qdrant collection for the main index |
@@ -32,6 +32,11 @@ For a tiered memory layout, including a separate historical session archive and 
 | `ARCHIVE_ROOT` | unset | Enables the archive API; separate SQLite/Qdrant collections |
 | `ARCHIVE_SQLITE_PATH` | `archive.db` | SQLite database for the archive index |
 | `ARCHIVE_QDRANT_COLLECTION` | `memory-archive` | Qdrant collection for the archive index |
+| `PROMPT_MIN_RELEVANCE` | `0.2` | Minimum normalized evidence score for `profile=prompt` |
+| `PROMPT_MEMORY_QUOTA` | `3` | Maximum memory results in the prompt profile |
+| `PROMPT_ARTIFACT_QUOTA` | `1` | Maximum artifact results in the prompt profile |
+| `PROMPT_SESSION_QUOTA` | `2` | Maximum live-session results in the prompt profile |
+| `PROMPT_ARCHIVE_QUOTA` | `1` | Maximum archive results in the prompt profile |
 | `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` also logs unchanged files) |
 | `PORT` | `8080` | HTTP port the server listens on |
 
@@ -50,15 +55,20 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 
 - `POST /index` scans and incrementally indexes Markdown files; response includes added, changed, removed, and unchanged counts.
 - `GET /search?q=...&limit=10` returns ranked results combining FTS5 and vector scores.
-- `GET /unified/search?q=...&limit=10&scope=all` searches the main index and,
+- `GET /unified/search?q=...&limit=10&scope=all&profile=tool` searches the main index and,
   when configured, the explicit archive index. `scope` may be `all`, `main`, or
   `archive`. Results carry stable `source` labels (`memory`, `artifact`,
   `session`, or `archive`), a backend-independent result ID, and separate
   lexical/semantic score contributions. If one selected backend fails, the
   response remains successful with a `warnings` array describing the partial
   result set.
+- `profile=tool` preserves the broad, backward-compatible result set.
+  `profile=prompt` applies normalized evidence thresholds and per-source quotas
+  so automatic recall cannot be dominated by one corpus. Thresholds apply to
+  `relevance_score`, not the small reciprocal-rank-fusion (`score`) values.
 - Search results include the combined `score` plus separate `lexical_score` and
-  `semantic_score` contributions for diagnostics.
+  `semantic_score` reciprocal-rank contributions, raw `lexical_evidence` and
+  `semantic_similarity`, and a normalized `relevance_score` for diagnostics.
 - Results under `outputs/` are labeled with `source: "artifact"`; register
   generated files in `outputs/INDEX.md` so their metadata is searchable. The
   generated files themselves are not parsed as memory.
@@ -80,8 +90,13 @@ To bootstrap an existing session corpus into the archive, use
 corpus format (each line starting with `[<jsonl-path>#L<n>]`), never
 overwrites existing destination files, and writes a SHA-256 manifest.
 
-Only Markdown files are read. Symlinks are ignored, `exchange/` is excluded by
-default, and file paths in results are relative to the configured document root.
+Only Markdown files are read. Symlinks are ignored. Normal indexing excludes
+`memory/dreaming/`, `memory/.dreams/`, digests, handoffs, system-health output,
+review candidates, archives, and `exchange/` at any depth. File paths in
+results are relative to the configured document root. **Important:** supplying
+`EXCLUDE_PATTERNS` replaces these defaults. Deployments such as Docker Compose
+that set it explicitly must copy the complete hygiene list or remove the
+override to inherit future safe defaults.
 
 ## Logging
 
