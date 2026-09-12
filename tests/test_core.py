@@ -86,6 +86,46 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(self.store.search("artifact"))
         self.assertFalse(self.store.search("transfer"))
 
+    def test_default_hygiene_exclusions_remove_workflow_material(self):
+        from memory_store.server import EXCLUDE_PATTERNS
+
+        files = {
+            "memory/daily.md": "# Daily\nauthoritative fact",
+            "memory/dreaming/noise.md": "dream noise",
+            "memory/.dreams/staged.md": "staged noise",
+            "memory/digests/news.md": "digest noise",
+            "memory/handoffs/task.md": "handoff noise",
+            "memory/system-health/report.md": "health noise",
+            "memory/review-candidates/draft.md": "candidate noise",
+            "memory/archive/old.md": "archive noise",
+            "nested/exchange/transfer.md": "exchange noise",
+        }
+        for relative, content in files.items():
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        Indexer(self.root, self.store, exclude_patterns=EXCLUDE_PATTERNS).scan()
+        self.assertTrue(self.store.search("authoritative"))
+        for term in ("dream", "staged", "digest", "handoff", "health", "candidate", "archive", "exchange"):
+            self.assertFalse(self.store.search(term), term)
+
+    def test_hygiene_reconciliation_removes_previously_indexed_noise(self):
+        authoritative = self.root / "memory" / "daily.md"
+        noise = self.root / "memory" / "dreaming" / "staged.md"
+        authoritative.parent.mkdir(parents=True)
+        noise.parent.mkdir(parents=True)
+        authoritative.write_text("# Daily\nkeep this fact")
+        noise.write_text("# Staged\nremove this noise")
+        Indexer(self.root, self.store).scan()
+        self.assertTrue(self.store.search("noise"))
+
+        from memory_store.server import EXCLUDE_PATTERNS
+
+        stats = Indexer(self.root, self.store, exclude_patterns=EXCLUDE_PATTERNS).scan()
+        self.assertEqual(stats.removed, 1)
+        self.assertTrue(self.store.search("fact"))
+        self.assertFalse(self.store.search("noise"))
+
 
 if __name__ == "__main__":
     unittest.main()

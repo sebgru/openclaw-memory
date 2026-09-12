@@ -48,6 +48,8 @@ class ApiTests(unittest.TestCase):
             self.assertGreater(result["lexical_score"], 0)
             self.assertEqual(result["semantic_score"], 0)
             self.assertEqual(result["score"], result["lexical_score"])
+            self.assertEqual(result["lexical_evidence"], 2.0)
+            self.assertEqual(result["relevance_score"], 1.0)
         finally:
             server.store.search = original
 
@@ -152,6 +154,57 @@ class ApiTests(unittest.TestCase):
         finally:
             server.hybrid_search = original_hybrid
             server.archive_store = original_archive
+
+    def test_unified_search_deduplicates_repeated_session_content(self):
+        original_hybrid = server.hybrid_search
+        original_archive = server.archive_store
+        try:
+            server.archive_store = object()
+
+            def fake_hybrid(query, limit, selected_store, selected_vector_store):
+                path = "sessions/live.md" if selected_store is server.store else "copies/old.md"
+                return [{
+                    "id": path,
+                    "path": path,
+                    "heading": "Decision",
+                    "text": "  Keep   the approved architecture. ",
+                    "line": 4,
+                    "score": 0.3,
+                    "lexical_score": 0.1,
+                    "semantic_score": 0.2,
+                    "lexical_evidence": 2.0,
+                    "semantic_similarity": 0.8,
+                    "relevance_score": 0.8,
+                }]
+
+            server.hybrid_search = fake_hybrid
+            results, warnings = server.unified_search("architecture", 10)
+            self.assertEqual(warnings, [])
+            self.assertEqual(len(results), 1)
+            self.assertEqual(len(results[0]["alternate_provenance"]), 1)
+            self.assertEqual(results[0]["score"], 0.3)
+        finally:
+            server.hybrid_search = original_hybrid
+            server.archive_store = original_archive
+
+    def test_prompt_profile_applies_relevance_and_source_quotas(self):
+        original_min = server.PROMPT_MIN_RELEVANCE
+        original_quotas = server.PROMPT_SOURCE_QUOTAS
+        try:
+            server.PROMPT_MIN_RELEVANCE = 0.5
+            server.PROMPT_SOURCE_QUOTAS = {"memory": 1, "artifact": 1, "session": 1, "archive": 1}
+            rows = [
+                {"source": "memory", "relevance_score": 0.9, "id": "m1"},
+                {"source": "memory", "relevance_score": 0.8, "id": "m2"},
+                {"source": "artifact", "relevance_score": 0.7, "id": "a1"},
+                {"source": "archive", "relevance_score": 0.4, "id": "old"},
+            ]
+            selected = server.apply_search_profile(rows, 10, "prompt")
+            self.assertEqual([row["id"] for row in selected], ["m1", "a1"])
+            self.assertEqual(server.apply_search_profile(rows, 10, "tool"), rows)
+        finally:
+            server.PROMPT_MIN_RELEVANCE = original_min
+            server.PROMPT_SOURCE_QUOTAS = original_quotas
 
     def test_unified_search_rejects_invalid_scope(self):
         with self.assertRaises(ValueError):
@@ -268,6 +321,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.request("/unified/search?q=fact&limit=0"), 400)
         self.assertEqual(self.request("/unified/search?q=fact&limit=101"), 400)
         self.assertEqual(self.request("/unified/search?q=fact&scope=bogus"), 400)
+        self.assertEqual(self.request("/unified/search?q=fact&profile=bogus"), 400)
         original_archive = server.archive_store
         try:
             server.archive_store = None
