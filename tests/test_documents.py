@@ -6,6 +6,7 @@ from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
@@ -164,6 +165,55 @@ class DocumentIndexerTests(unittest.TestCase):
             self.store.upsert_file_precomputed = original
         self.assertEqual(result.errors, 1)
         self.assertEqual(set(self.vectors.rows), old_ids)
+
+    def test_stable_read_raises_when_file_keeps_changing(self):
+        path = self.root / "flaky.md"
+        path.write_text("unstable content")
+        calls = {"n": 0}
+        real_stat = Path.stat
+        real_read = Path.read_text
+
+        def flaky_stat(self, *args, **kwargs):
+            # Alternate the reported size so the before/after comparison
+            # never stabilises across the 3 attempts.
+            calls["n"] += 1
+            st = real_stat(self, *args, **kwargs)
+            return SimpleNamespace(
+                st_size=st.st_size + calls["n"],
+                st_mtime_ns=st.st_mtime_ns,
+                st_mode=st.st_mode,
+            )
+
+        def flaky_read(self, *args, **kwargs):
+            return real_read(self, *args, **kwargs)
+
+        with patch.object(Path, "stat", flaky_stat), patch.object(Path, "read_text", flaky_read):
+            result = self.indexer.scan()
+        self.assertEqual(result.errors, 1)
+        self.assertEqual(self.indexer.status()["files_with_errors"], 1)
+
+    def test_sqlite_failure_without_vector_store_skips_cleanup(self):
+        indexer = DocumentIndexer(
+            self.root,
+            self.store,
+            vector_store=None,
+            embed=lambda text: [0.125] * 8,
+        )
+        path = self.root / "nov.md"
+        path.write_text("no vector backend")
+        indexer.scan()
+        path.write_text("changed body")
+        original = self.store.upsert_file_precomputed
+
+        def fail(*args):
+            raise OSError("sqlite full")
+
+        self.store.upsert_file_precomputed = fail
+        try:
+            result = indexer.scan()
+        finally:
+            self.store.upsert_file_precomputed = original
+        self.assertEqual(result.errors, 1)
 
 
 class DocumentApiTests(unittest.TestCase):

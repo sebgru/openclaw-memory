@@ -208,6 +208,28 @@ class ApiTests(unittest.TestCase):
             server.PROMPT_MIN_RELEVANCE = original_min
             server.PROMPT_SOURCE_QUOTAS = original_quotas
 
+    def test_prompt_profile_stops_when_limit_reached(self):
+        original_min = server.PROMPT_MIN_RELEVANCE
+        original_quotas = server.PROMPT_SOURCE_QUOTAS
+        try:
+            server.PROMPT_MIN_RELEVANCE = 0.0
+            server.PROMPT_SOURCE_QUOTAS = {
+                "memory": 10,
+                "artifact": 10,
+                "session": 10,
+                "archive": 10,
+            }
+            rows = [{"source": "memory", "relevance_score": 0.9, "id": f"m{i}"} for i in range(5)]
+            selected = server.apply_search_profile(rows, 2, "prompt")
+            self.assertEqual([row["id"] for row in selected], ["m0", "m1"])
+        finally:
+            server.PROMPT_MIN_RELEVANCE = original_min
+            server.PROMPT_SOURCE_QUOTAS = original_quotas
+
+    def test_unified_search_rejects_invalid_profile(self):
+        with self.assertRaises(ValueError):
+            server.unified_search("fact", 10, profile="bogus")
+
     def test_unified_search_rejects_invalid_scope(self):
         with self.assertRaises(ValueError):
             server.unified_search("fact", 10, "sessions")
