@@ -239,6 +239,40 @@ class QdrantExtendedTests(unittest.TestCase):
         point_id = calls[-1][1]["points"][0]["id"]
         self.assertRegex(point_id, r"^[0-9a-f-]{36}$")
 
+    def test_upsert_precomputed_uses_supplied_vector(self):
+        store = self.make_store()
+        calls = []
+
+        def fake(req, timeout):
+            calls.append((req.method, json.loads(req.data) if req.data else None))
+            if req.method == "GET":
+                return FakeResponse({"result": {"config": {"params": {"vectors": {"size": 2}}}}})
+            return FakeResponse({})
+
+        with patch("memory_store.qdrant.urlopen", fake):
+            store.upsert_precomputed([("chunk", "a.md", "A", "body", 1, [0.25, 0.75])])
+        self.assertEqual(calls[-1][1]["points"][0]["vector"], [0.25, 0.75])
+
+    def test_upsert_precomputed_empty_records_is_noop(self):
+        store = self.make_store()
+        with patch("memory_store.qdrant.urlopen") as mock:
+            store.upsert_precomputed([])
+        mock.assert_not_called()
+
+    def test_delete_ids_uses_deterministic_uuids(self):
+        store = self.make_store()
+        calls = []
+
+        def fake(req, timeout):
+            calls.append(json.loads(req.data))
+            return FakeResponse({})
+
+        with patch("memory_store.qdrant.urlopen", fake):
+            store.delete_ids(["chunk"])
+            store.delete_ids([])
+        self.assertEqual(len(calls), 1)
+        self.assertRegex(calls[0]["points"][0], r"^[0-9a-f-]{36}$")
+
 
 # ── Chunker edge cases ───────────────────────────────────────────────────────
 
@@ -398,6 +432,15 @@ class ApiExtendedTests(unittest.TestCase):
         self.assertAlmostEqual(sum(x * x for x in vec), 1.0, places=5)
         self.assertIsNone(store.vector("missing"))
         self.assertIsNone(store.vector("missing"))
+        store.close()
+
+    def test_sqlite_store_precomputed_upsert_and_chunk_ids(self):
+        store = SQLiteStore(":memory:", dimensions=2)
+        store.upsert_file_precomputed(
+            "doc.md", "digest", [("one", "Heading", "body", 1, [0.25, 0.75])]
+        )
+        self.assertEqual(store.chunk_ids("doc.md"), ["one"])
+        self.assertEqual(store.vector("one"), [0.25, 0.75])
         store.close()
 
     def test_sqlite_search_empty_query(self):

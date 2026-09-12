@@ -16,7 +16,7 @@ curl 'http://localhost:8080/search?q=release%20notes&limit=5'
 curl 'http://localhost:8080/unified/search?q=release%20notes&limit=5&scope=all'
 ```
 
-Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PATTERNS`, `EXCLUDE_PATTERNS`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, `LOG_LEVEL`, and `PORT`. No credentials or deployment-specific paths are required.
+Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PATTERNS`, `EXCLUDE_PATTERNS`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, `LOG_LEVEL`, and `PORT`. No credentials or deployment-specific paths are required. A separately mounted converted-Markdown corpus can be enabled with the `DOCUMENTS_*` variables below; the service indexes it but never converts or modifies source documents.
 
 For a tiered memory layout, including a separate historical session archive and a human-reviewed promotion workflow, see [Tiered memory architecture](docs/MEMORY_ARCHITECTURE.md). Set `ARCHIVE_ROOT`, `ARCHIVE_SQLITE_PATH`, and optionally `ARCHIVE_QDRANT_COLLECTION` to enable the explicit `/archive/*` API.
 
@@ -37,6 +37,12 @@ For a tiered memory layout, including a separate historical session archive and 
 | `PROMPT_ARTIFACT_QUOTA` | `1` | Maximum artifact results in the prompt profile |
 | `PROMPT_SESSION_QUOTA` | `2` | Maximum live-session results in the prompt profile |
 | `PROMPT_ARCHIVE_QUOTA` | `1` | Maximum archive results in the prompt profile |
+| `DOCUMENTS_ROOT` | unset | Read-only converted-Markdown corpus; enables `/documents/*` |
+| `DOCUMENTS_SQLITE_PATH` | `documents.db` | Separate document FTS/index-state database |
+| `DOCUMENTS_QDRANT_COLLECTION` | `documents` | Separate document vector collection |
+| `DOCUMENTS_INCLUDE_PATTERNS` | `**/*.md` | Comma-separated document globs |
+| `DOCUMENTS_EXCLUDE_PATTERNS` | empty | Comma-separated document exclusions |
+| `PROMPT_DOCUMENT_QUOTA` | `2` | Maximum document results in the prompt profile |
 | `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` also logs unchanged files) |
 | `PORT` | `8080` | HTTP port the server listens on |
 
@@ -56,9 +62,9 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 - `POST /index` scans and incrementally indexes Markdown files; response includes added, changed, removed, and unchanged counts.
 - `GET /search?q=...&limit=10` returns ranked results combining FTS5 and vector scores.
 - `GET /unified/search?q=...&limit=10&scope=all&profile=tool` searches the main index and,
-  when configured, the explicit archive index. `scope` may be `all`, `main`, or
-  `archive`. Results carry stable `source` labels (`memory`, `artifact`,
-  `session`, or `archive`), a backend-independent result ID, and separate
+  when configured, the explicit archive and document indexes. `scope` may be
+  `all`, `main`, `archive`, or `documents`. Results carry stable `source`
+  labels (`memory`, `artifact`, `session`, `archive`, or `document`), a backend-independent result ID, and separate
   lexical/semantic score contributions. If one selected backend fails, the
   response remains successful with a `warnings` array describing the partial
   result set.
@@ -74,6 +80,14 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
   generated files themselves are not parsed as memory.
 - `GET /healthz` returns service health.
 - `POST /archive/index`, `GET /archive/search`, and `GET /archive/status` operate on the separately configured historical archive.
+- `POST /documents/index`, `GET /documents/search`, and `GET /documents/status`
+  operate on a separately configured converted-Markdown corpus. The index call
+  accepts `{"max_files":250}` (1–10000) so an initial backfill is bounded and
+  resumable. It detects new, changed, renamed, and deleted paths, isolates
+  per-file errors, and retains the last successfully searchable version when a
+  read, embedding, or vector write fails.
+- `POST /documents/reconcile` uses the same explicit `{"confirm":true}` vector
+  repair contract as the main/archive reconciliation endpoints.
 - `GET /status` (and `/healthz`) report SQLite integrity, index freshness (`last_index_started_at`, `last_index_completed_at`, `last_index_error`, `age_seconds`), and — when Qdrant is configured — vector parity diagnostics (`points`, `chunks`, `missing_vectors`).
 - `POST /reconcile` (or `/archive/reconcile`) repairs missing Qdrant points only when sent with `{"confirm":true}`; it is operator-controlled, locked, and never deletes or replaces existing points. An optional `limit` (1–10000, default 1000) bounds how many missing points are upserted per call; the response reports `reconciled` and `remaining` counts.
 - `GET /promotion/candidates` lists queued candidates with `bytes` and an `eligible` flag (files over 256 KiB or empty are ineligible, with a `reason`); `POST /promotion/promote` promotes one only with an explicit `approved_by` value and never overwrites an existing destination.
@@ -111,6 +125,30 @@ When Qdrant is configured, SQLite remains the durable source of indexed state an
 3. Re-check: `missing_vectors` should now be `0`.
 
 The endpoint takes a file lock (`<db>.vector-reconcile.lock`), so concurrent calls serialize. Do not schedule it automatically; run it only after diagnostics report missing vectors.
+
+## Converted-document deployment
+
+Keep the existing conversion pipeline unchanged. Mount only its Markdown
+output into this service, read-only, and give the document index separate
+storage:
+
+```yaml
+environment:
+  DOCUMENTS_ROOT: /data/documents/converted
+  DOCUMENTS_SQLITE_PATH: /data/index/documents.db
+  DOCUMENTS_QDRANT_COLLECTION: tenant-documents
+  DOCUMENTS_INCLUDE_PATTERNS: "**/*.md"
+  PROMPT_DOCUMENT_QUOTA: "2"
+volumes:
+  - /host/workspace/converted:/data/documents/converted:ro
+  - memory_data:/data/index
+```
+
+Use the existing `QDRANT_URL`, `EMBEDDING_URL`, `EMBEDDING_MODEL=bge-m3`, and
+`EMBEDDING_DIMENSIONS=1024`. The document database and collection must not be
+shared with the main or archive indexes. Repeated bounded calls to
+`POST /documents/index` complete the initial backfill; subsequent calls skip
+unchanged files using stored size, nanosecond mtime, and SHA-256 metadata.
 
 ## CI/CD
 
