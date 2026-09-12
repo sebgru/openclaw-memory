@@ -46,6 +46,25 @@ class SQLiteStore:
             )
         self.db.commit()
 
+    def upsert_file_precomputed(self, path, digest, chunks):
+        """Atomically replace a file using already-computed vectors."""
+        with self.db:
+            self.delete_file(path, commit=False)
+            self.db.execute("INSERT INTO files VALUES (?,?)", (path, digest))
+            for chunk_id, heading, body, line, vector in chunks:
+                vec = ",".join(map(str, vector))
+                self.db.execute(
+                    "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                    (chunk_id, path, heading, body, line, vec),
+                )
+                self.db.execute(
+                    "INSERT INTO chunks_fts VALUES (?,?,?,?)",
+                    (chunk_id, path, heading, body),
+                )
+
+    def chunk_ids(self, path):
+        return [row[0] for row in self.db.execute("SELECT id FROM chunks WHERE path=?", (path,))]
+
     def delete_file(self, path, commit=True):
         ids = [r[0] for r in self.db.execute("SELECT id FROM chunks WHERE path=?", (path,))]
         self.db.execute("DELETE FROM files WHERE path=?", (path,))

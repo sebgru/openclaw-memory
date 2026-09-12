@@ -7,6 +7,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .document_indexer import DocumentIndexer
 from .embeddings import EmbeddingClient
 from .indexer import Indexer
 from .maintenance import verify_database
@@ -49,6 +50,7 @@ DEFAULT_EXCLUDE_PATTERNS = ",".join(
 )
 EXCLUDE_PATTERNS = patterns("EXCLUDE_PATTERNS", DEFAULT_EXCLUDE_PATTERNS)
 ARCHIVE_ROOT = os.getenv("ARCHIVE_ROOT")
+DOCUMENTS_ROOT = os.getenv("DOCUMENTS_ROOT")
 embedder = EmbeddingClient(os.getenv("EMBEDDING_URL"), os.getenv("EMBEDDING_MODEL", "default"), DIM)
 store = SQLiteStore(os.getenv("SQLITE_PATH", "memory.db"), DIM)
 vector_store = (
@@ -68,6 +70,20 @@ archive_vector_store = (
     if ARCHIVE_ROOT and os.getenv("QDRANT_URL")
     else None
 )
+documents_store = (
+    SQLiteStore(os.getenv("DOCUMENTS_SQLITE_PATH", "documents.db"), DIM) if DOCUMENTS_ROOT else None
+)
+documents_vector_store = (
+    QdrantStore(
+        os.getenv("QDRANT_URL"),
+        os.getenv("DOCUMENTS_QDRANT_COLLECTION", "documents"),
+        DIM,
+    )
+    if DOCUMENTS_ROOT and os.getenv("QDRANT_URL")
+    else None
+)
+DOCUMENTS_INCLUDE_PATTERNS = patterns("DOCUMENTS_INCLUDE_PATTERNS", "**/*.md")
+DOCUMENTS_EXCLUDE_PATTERNS = patterns("DOCUMENTS_EXCLUDE_PATTERNS", "")
 
 
 _DEFAULT_VECTOR = object()
@@ -87,6 +103,7 @@ PROMPT_SOURCE_QUOTAS = {
     "artifact": env_int("PROMPT_ARTIFACT_QUOTA", 1),
     "session": env_int("PROMPT_SESSION_QUOTA", 2),
     "archive": env_int("PROMPT_ARCHIVE_QUOTA", 1),
+    "document": env_int("PROMPT_DOCUMENT_QUOTA", 2),
 }
 
 
@@ -179,10 +196,12 @@ def annotate_result(result):
     return {**result, "source": source}
 
 
-def unified_source(result, archive=False):
+def unified_source(result, archive=False, document=False):
     """Return the stable corpus label for a unified-search result."""
     if archive:
         return "archive"
+    if document:
+        return "document"
     path = str(result.get("path", ""))
     if path.startswith(("sessions/", "session/")) or "/sessions/" in path:
         return "session"
@@ -242,25 +261,30 @@ def apply_search_profile(results, limit, profile):
 
 def unified_search(query, limit, scope="all", profile="tool"):
     """Search the configured main/archive indexes and merge partial results."""
-    if scope not in {"all", "main", "archive"}:
-        raise ValueError("scope must be one of all, main, archive")
+    if scope not in {"all", "main", "archive", "documents"}:
+        raise ValueError("scope must be one of all, main, archive, documents")
     if profile not in {"tool", "prompt"}:
         raise ValueError("profile must be one of tool, prompt")
     if scope == "archive" and not archive_store:
         raise LookupError("archive is not configured")
+    if scope == "documents" and not documents_store:
+        raise LookupError("documents are not configured")
 
     warnings = []
     merged: dict[str, dict] = {}
     backends = []
     if scope in {"all", "main"}:
-        backends.append(("main", store, vector_store, False))
+        backends.append(("main", store, vector_store, False, False))
     if scope in {"all", "archive"}:
         if archive_store:
-            backends.append(("archive", archive_store, archive_vector_store, True))
+            backends.append(("archive", archive_store, archive_vector_store, True, False))
         else:
             warnings.append("archive: not configured")
 
-    for name, selected_store, selected_vector_store, is_archive in backends:
+    if scope in {"all", "documents"} and documents_store:
+        backends.append(("documents", documents_store, documents_vector_store, False, True))
+
+    for name, selected_store, selected_vector_store, is_archive, is_document in backends:
         try:
             rows = hybrid_search(query, limit * 3, selected_store, selected_vector_store)
         except Exception as exc:
@@ -268,7 +292,7 @@ def unified_search(query, limit, scope="all", profile="tool"):
             warnings.append(f"{name}: search backend unavailable")
             continue
         for row in rows:
-            source = unified_source(row, archive=is_archive)
+            source = unified_source(row, archive=is_archive, document=is_document)
             result_id = unified_result_id(row, source)
             item = merged.setdefault(
                 result_id,
@@ -329,6 +353,27 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 status,
             )
+        if parsed.path == "/documents/status":
+            if not documents_store:
+                return self.send_json(404, {"error": "documents are not configured"})
+            integrity = verify_database(
+                documents_store.db.execute("PRAGMA database_list").fetchone()[2]
+            )
+            document_status = DocumentIndexer(
+                DOCUMENTS_ROOT,
+                documents_store,
+                documents_vector_store,
+                embedder.embed,
+                include_patterns=DOCUMENTS_INCLUDE_PATTERNS,
+                exclude_patterns=DOCUMENTS_EXCLUDE_PATTERNS,
+            ).status()
+            status = {"status": integrity["status"], "database": integrity, **document_status}
+            if documents_vector_store:
+                try:
+                    status["vectors"] = vector_status(documents_store, documents_vector_store)
+                except Exception as exc:
+                    status["vectors"] = {"status": "error", "error": str(exc)}
+            return self.send_json(200, status)
         if parsed.path == "/promotion/candidates":
             return self.send_json(200, {"candidates": candidates(ROOT)})
         if parsed.path == "/archive/status":
@@ -348,10 +393,13 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     status["vectors"] = {"status": "error", "error": str(exc)}
             return self.send_json(200, status)
-        if parsed.path in ("/search", "/archive/search"):
+        if parsed.path in ("/search", "/archive/search", "/documents/search"):
             is_archive = parsed.path.startswith("/archive/")
+            is_documents = parsed.path.startswith("/documents/")
             if is_archive and not archive_store:
                 return self.send_json(404, {"error": "archive is not configured"})
+            if is_documents and not documents_store:
+                return self.send_json(404, {"error": "documents are not configured"})
             query = params.get("q", [""])[0]
             try:
                 limit = int(params.get("limit", [10])[0])
@@ -365,9 +413,15 @@ class Handler(BaseHTTPRequestHandler):
                 results = hybrid_search(
                     query,
                     limit,
-                    archive_store if is_archive else store,
-                    archive_vector_store if is_archive else vector_store,
+                    archive_store if is_archive else documents_store if is_documents else store,
+                    archive_vector_store
+                    if is_archive
+                    else documents_vector_store
+                    if is_documents
+                    else vector_store,
                 )
+                if is_documents:
+                    results = [{**row, "source": "document"} for row in results]
                 logger.info(
                     "%s q=%r limit=%d results=%d took=%.1fms",
                     parsed.path,
@@ -394,8 +448,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(
                     400, {"error": "q is required and limit must be between 1 and 100"}
                 )
-            if scope not in {"all", "main", "archive"}:
-                return self.send_json(400, {"error": "scope must be one of all, main, archive"})
+            if scope not in {"all", "main", "archive", "documents"}:
+                return self.send_json(
+                    400, {"error": "scope must be one of all, main, archive, documents"}
+                )
             if profile not in {"tool", "prompt"}:
                 return self.send_json(400, {"error": "profile must be one of tool, prompt"})
             try:
@@ -425,10 +481,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path in ("/reconcile", "/archive/reconcile"):
+        if self.path in ("/reconcile", "/archive/reconcile", "/documents/reconcile"):
             is_archive = self.path.startswith("/archive/")
-            selected_store = archive_store if is_archive else store
-            selected_vectors = archive_vector_store if is_archive else vector_store
+            is_documents = self.path.startswith("/documents/")
+            selected_store = (
+                archive_store if is_archive else documents_store if is_documents else store
+            )
+            selected_vectors = (
+                archive_vector_store
+                if is_archive
+                else documents_vector_store
+                if is_documents
+                else vector_store
+            )
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length) or b"{}")
@@ -457,6 +522,26 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return self.send_json(200, result)
             except (KeyError, TypeError, json.JSONDecodeError, PromotionError) as exc:
+                return self.send_json(400, {"error": str(exc)})
+        if self.path == "/documents/index":
+            if not documents_store:
+                return self.send_json(404, {"error": "documents are not configured"})
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                max_files = int(payload.get("max_files", 250))
+                stats = DocumentIndexer(
+                    DOCUMENTS_ROOT,
+                    documents_store,
+                    documents_vector_store,
+                    embedder.embed,
+                    include_patterns=DOCUMENTS_INCLUDE_PATTERNS,
+                    exclude_patterns=DOCUMENTS_EXCLUDE_PATTERNS,
+                ).scan(max_files=max_files)
+                logger.info("%s %s", self.path, stats.as_dict())
+                return self.send_json(200, stats.as_dict())
+            except (json.JSONDecodeError, OSError, UnicodeError, ValueError) as exc:
+                logger.warning("%s failed: %s", self.path, exc)
                 return self.send_json(400, {"error": str(exc)})
         if self.path not in ("/index", "/archive/index"):
             return self.send_json(404, {"error": "not found"})
@@ -487,10 +572,12 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     logger.info(
-        "starting server on port %s (document_root=%s, qdrant=%s, archive_root=%s)",
+        "starting server on port %s "
+        "(document_root=%s, qdrant=%s, archive_root=%s, documents_root=%s)",
         os.getenv("PORT", "8080"),
         ROOT,
         bool(vector_store),
         ARCHIVE_ROOT or "disabled",
+        DOCUMENTS_ROOT or "disabled",
     )
     ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler).serve_forever()

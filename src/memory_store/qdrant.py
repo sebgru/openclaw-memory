@@ -59,6 +59,32 @@ class QdrantStore:
             "PUT", "/collections/" + quote(self.collection, safe="") + "/points", {"points": points}
         )
 
+    def upsert_precomputed(self, records):
+        """Upsert records whose embedding vectors were computed by the caller."""
+        if not records:
+            return
+        self.ensure_collection()
+        points = [
+            {
+                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, cid)),
+                "vector": vector,
+                "payload": {"path": path, "heading": heading, "text": body, "line": line},
+            }
+            for cid, path, heading, body, line, vector in records
+        ]
+        self._request(
+            "PUT", "/collections/" + quote(self.collection, safe="") + "/points", {"points": points}
+        )
+
+    def delete_ids(self, ids):
+        if not ids:
+            return
+        self._request(
+            "POST",
+            "/collections/" + quote(self.collection, safe="") + "/points/delete",
+            {"points": [str(uuid.uuid5(uuid.NAMESPACE_URL, item)) for item in ids]},
+        )
+
     def delete_file(self, path):
         self._request(
             "POST",
