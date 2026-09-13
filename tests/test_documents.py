@@ -310,6 +310,54 @@ class DocumentIndexerTests(unittest.TestCase):
         self.assertEqual(second.errors, 1)
         self.assertEqual(self.indexer.status()["files_with_errors"], 1)
 
+    def test_state_row_for_deleted_never_indexed_file_is_purged(self):
+        """A successful scan must clear error state for paths that no longer exist.
+
+        Regression: a file that failed before ever being indexed leaves a
+        ``document_file_state`` row with ``status='error'``.  Because the path is
+        absent from ``files`` too, the removal branch never touches it, so every
+        following scan succeeds yet ``/documents/status`` keeps reporting
+        ``files_with_errors > 0`` forever.
+        """
+        path = self.root / "orphan.md"
+        path.write_bytes(b"\xff")
+        first = self.indexer.scan()
+        self.assertEqual(first.errors, 1)
+        self.assertEqual(self.indexer.status()["files_with_errors"], 1)
+
+        path.unlink()
+        second = self.indexer.scan()
+        self.assertEqual(second.errors, 0)
+        self.assertEqual(second.removed, 0)  # nothing was ever indexed for this path
+        self.assertEqual(self.indexer.status()["files_with_errors"], 0)
+        self.assertEqual(self.indexer.errors(), [])
+
+    def test_deleted_but_indexed_file_state_row_is_purged(self):
+        """Deleting a previously indexed file clears its state row as before."""
+        path = self.root / "tracked.md"
+        path.write_text("tracked body")
+        self.indexer.scan()
+        self.assertEqual(self.indexer.status()["files_with_errors"], 0)
+
+        path.unlink()
+        result = self.indexer.scan()
+        self.assertEqual(result.removed, 1)
+        rows = self.store.db.execute(
+            "SELECT count(*) FROM document_file_state WHERE path='tracked.md'"
+        ).fetchone()[0]
+        self.assertEqual(rows, 0)
+
+    def test_existing_file_error_state_is_not_purged(self):
+        """Purging stale rows must not drop a file that still exists and fails."""
+        (self.root / "broken.md").write_bytes(b"\xff")
+        self.indexer.scan()
+        self.indexer.scan()
+        rows = self.store.db.execute(
+            "SELECT count(*) FROM document_file_state WHERE path='broken.md'"
+        ).fetchone()[0]
+        self.assertEqual(rows, 1)
+        self.assertEqual(self.indexer.status()["files_with_errors"], 1)
+
 
 class DocumentApiTests(unittest.TestCase):
     @classmethod

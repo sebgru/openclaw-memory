@@ -177,6 +177,21 @@ class DocumentIndexer:
             if rel in retry or self.store.file_digest(rel) != digest
         ]
         removals = sorted(existing - set(discovered) - set(failures))
+        # Unreachable state rows: a path that is neither on disk (present in
+        # ``discovered`` or ``failures``) nor tracked in the content index. This
+        # happens when a file fails before it is ever indexed and is later
+        # deleted or renamed. The removal branch only walks ``files``, so such a
+        # row would survive every successful scan and keep
+        # ``/documents/status`` reporting ``files_with_errors > 0`` forever.
+        stale_state = [
+            row[0]
+            for row in self.store.db.execute("SELECT path FROM document_file_state")
+            if row[0] not in discovered and row[0] not in failures and row[0] not in existing
+        ]
+        if stale_state:
+            with self.store.write_lock, self.store.db:
+                for rel in stale_state:
+                    self.store.db.execute("DELETE FROM document_file_state WHERE path=?", (rel,))
         stats.unchanged = len(discovered) - len(changes)
         actions = [("upsert", rel) for rel in sorted(changes)] + [
             ("remove", rel) for rel in removals
