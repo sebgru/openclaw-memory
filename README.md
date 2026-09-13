@@ -195,11 +195,12 @@ unchanged files using stored size, nanosecond mtime, and SHA-256 metadata.
 - **CI** (`ci.yml`): Ruff lint and format check, mypy type check, pytest with coverage (≥ 99%), Codecov upload, Docker build verification
 - **Release** (`release.yml`): triggered only on version tags (`v*.*.*`); runs tests, builds the Python package, and creates a GitHub Release with the wheel and sdist attached
 
-To publish a release:
+To publish a release, bump `version` in `pyproject.toml` on a `chore/release-vX.Y.Z`
+branch, merge that PR to `main`, then tag the merge commit and push the tag:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag -a v1.12.2 -m "Release v1.12.2"
+git push origin v1.12.2
 ```
 
 ## Development
