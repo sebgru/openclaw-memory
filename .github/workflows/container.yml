@@ -2,7 +2,6 @@ name: Build container
 
 on:
   push:
-    branches: [master]
     tags: ['v*']
 
 permissions:
@@ -23,8 +22,9 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
+          # Only version tag pushes reach this workflow. metadata-action's default
+          # flavor (latest=auto) publishes 'latest' alongside the version tag.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=sha
       - uses: docker/build-push-action@v7
