@@ -82,14 +82,16 @@ class EmbeddingClientTests(unittest.TestCase):
         ):
             self.assertEqual(client.embed("hi"), [0, 1, 0, 0])
 
-    def test_dimension_mismatch_raises(self):
-        client = EmbeddingClient("http://embed", dimensions=4)
+    def test_dimension_mismatch_falls_back_to_hash(self):
+        client = EmbeddingClient("http://embed", dimensions=8)
         with patch(
             "memory_store.embeddings.urlopen",
             lambda req, timeout: FakeResponse({"data": [{"embedding": [1, 0]}]}),
         ):
-            with self.assertRaises(ValueError):
-                client.embed("hi")
+            result = client.embed("hi")
+        # Dimension mismatch triggers fallback to hash_embedding
+        self.assertEqual(len(result), 8)
+        self.assertEqual(result, hash_embedding("hi", 8))
 
     def test_request_body_shape(self):
         client = EmbeddingClient("http://embed/api", model="m1", dimensions=4, timeout=3)

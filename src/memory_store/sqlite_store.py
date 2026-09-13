@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,6 +11,7 @@ class SQLiteStore:
         self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.dimensions = dimensions
+        self._write_lock = threading.Lock()
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, digest TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS chunks(id TEXT PRIMARY KEY, path TEXT NOT NULL, heading TEXT, body TEXT NOT NULL, line INTEGER, vector BLOB);
@@ -47,20 +49,33 @@ class SQLiteStore:
         self.db.commit()
 
     def upsert_file_precomputed(self, path, digest, chunks):
-        """Atomically replace a file using already-computed vectors."""
-        with self.db:
-            self.delete_file(path, commit=False)
-            self.db.execute("INSERT INTO files VALUES (?,?)", (path, digest))
-            for chunk_id, heading, body, line, vector in chunks:
-                vec = ",".join(map(str, vector))
-                self.db.execute(
-                    "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
-                    (chunk_id, path, heading, body, line, vec),
-                )
-                self.db.execute(
-                    "INSERT INTO chunks_fts VALUES (?,?,?,?)",
-                    (chunk_id, path, heading, body),
-                )
+        """Atomically replace a file using already-computed vectors.
+
+        Uses explicit BEGIN/COMMIT/ROLLBACK instead of the ``with self.db:``
+        context manager to avoid relying on ``in_transaction`` state, which
+        can desynchronise from the real SQLite transaction when FTS5 virtual
+        tables or concurrent threads are involved.  A threading lock
+        serialises concurrent writes on the shared connection.
+        """
+        with self._write_lock:
+            self.db.execute("BEGIN")
+            try:
+                self.delete_file(path, commit=False)
+                self.db.execute("INSERT INTO files VALUES (?,?)", (path, digest))
+                for chunk_id, heading, body, line, vector in chunks:
+                    vec = ",".join(map(str, vector))
+                    self.db.execute(
+                        "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                        (chunk_id, path, heading, body, line, vec),
+                    )
+                    self.db.execute(
+                        "INSERT INTO chunks_fts VALUES (?,?,?,?)",
+                        (chunk_id, path, heading, body),
+                    )
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
 
     def chunk_ids(self, path):
         return [row[0] for row in self.db.execute("SELECT id FROM chunks WHERE path=?", (path,))]
