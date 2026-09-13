@@ -356,6 +356,68 @@ class SQLiteTransactionTests(unittest.TestCase):
         # After rollback, the connection should not be stuck in a transaction
         self.assertFalse(self.store.db.in_transaction)
 
+    def test_upsert_survives_concurrent_writer_committing_shared_connection(self):
+        """Regression: Anna U8 2022-10-22 — 'cannot commit - no transaction is active'.
+
+        A second writer on the shared documents connection (for example
+        ``DocumentIndexer._init_state`` from a concurrent ``/documents/status``
+        request) commits the connection while an upsert transaction is still
+        in flight.  The explicit COMMIT used before this fix then failed with
+        ``sqlite3.OperationalError: cannot commit - no transaction is active``.
+        All writes must now be serialised on the store write lock, so the
+        upsert succeeds and its rows are committed.
+        """
+        path = "shared/Kinder/Anna/Medizinisches/2022-10-22 Früherkennungsuntersuchung U8.md"
+
+        def records():
+            yield ("c0", "heading", "body 0", 1, [0.1, 0.2, 0.3, 0.4])
+            yield ("c1", "heading", "body 1", 2, [0.2, 0.3, 0.4, 0.5])
+            # Emulate a concurrent writer committing the shared connection in
+            # the window between the last INSERT and the upsert's COMMIT.
+            self.store.set_index_metadata("concurrent_writer", "1")
+
+        self.store.upsert_file_precomputed(path, "digest-u8", records())
+
+        self.assertEqual(self.store.file_digest(path), "digest-u8")
+        self.assertEqual(sorted(self.store.chunk_ids(path)), ["c0", "c1"])
+        self.assertEqual(self.store.index_metadata()["concurrent_writer"], "1")
+        self.assertFalse(self.store.db.in_transaction)
+
+    def test_concurrent_metadata_writes_do_not_break_upsert(self):
+        """Metadata writes racing an upsert must not desynchronise the connection."""
+        errors = []
+        barrier = threading.Barrier(2)
+
+        def writer():
+            barrier.wait(timeout=10)
+            try:
+                for i in range(200):
+                    self.store.set_index_metadata("ticker", str(i))
+            except Exception as exc:  # pragma: no cover - only on regression
+                errors.append(str(exc))
+
+        def upserter():
+            barrier.wait(timeout=10)
+            try:
+                for i in range(50):
+                    self.store.upsert_file_precomputed(
+                        f"concurrent/doc{i}.md",
+                        f"digest-{i}",
+                        [(f"c{i}", "h", f"body {i}", i, [0.1] * 4)],
+                    )
+            except Exception as exc:  # pragma: no cover - only on regression
+                errors.append(str(exc))
+
+        threads = [threading.Thread(target=writer), threading.Thread(target=upserter)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        self.assertEqual(errors, [], f"Transaction errors: {errors}")
+        self.assertEqual(self.store.index_metadata()["ticker"], "199")
+        self.assertFalse(self.store.db.in_transaction)
+
 
 # ── Integration: DocumentIndexer with all three fixes ────────────────────────
 
@@ -445,6 +507,42 @@ class IndexerIntegrationTests(unittest.TestCase):
         # With NaN vectors, Qdrant would reject, but FakeVectorStore accepts anything.
         # The key point: the indexer completes without crashing.
         self.assertIn(result.added + result.errors, [1, 1])
+
+    def test_scan_survives_concurrent_indexer_construction(self):
+        """A concurrent request constructing a DocumentIndexer must not break a scan.
+
+        Each ``/documents/status`` or ``/documents/errors`` request builds a
+        ``DocumentIndexer``, whose ``_init_state`` writes and commits on the
+        same shared connection a running scan is using.
+        """
+        for i in range(10):
+            (self.root / f"anna{i}.md").write_text(f"# Anna {i}\nU8 content {i}")
+
+        indexer = DocumentIndexer(self.root, self.store, self.vectors, lambda text: [0.1] * 4)
+        errors = []
+        stop = threading.Event()
+
+        def status_poller():
+            try:
+                while not stop.is_set():
+                    DocumentIndexer(
+                        self.root, self.store, self.vectors, lambda text: [0.1] * 4
+                    ).errors()
+            except Exception as exc:  # pragma: no cover - only on regression
+                errors.append(str(exc))
+
+        poller = threading.Thread(target=status_poller)
+        poller.start()
+        try:
+            result = indexer.scan(max_files=50)
+        finally:
+            stop.set()
+            poller.join(timeout=10)
+
+        self.assertEqual(errors, [], f"Polling errors: {errors}")
+        self.assertEqual(result.errors, 0)
+        self.assertEqual(result.added, 10)
+        self.assertFalse(self.store.db.in_transaction)
 
     def test_concurrent_indexing_stress(self):
         """Multiple files indexed sequentially should not produce SQLite errors."""

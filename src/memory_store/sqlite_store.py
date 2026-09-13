@@ -11,7 +11,11 @@ class SQLiteStore:
         self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.dimensions = dimensions
-        self._write_lock = threading.Lock()
+        # Re-entrant lock guarding every write on this shared connection.
+        # A multi-statement transaction (``upsert_file_precomputed``) must not
+        # be overtaken by another writer committing the same connection, which
+        # surfaced as ``cannot commit - no transaction is active``.
+        self._write_lock = threading.RLock()
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, digest TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS chunks(id TEXT PRIMARY KEY, path TEXT NOT NULL, heading TEXT, body TEXT NOT NULL, line INTEGER, vector BLOB);
@@ -20,74 +24,90 @@ class SQLiteStore:
         """)
         self.db.commit()
 
+    @property
+    def write_lock(self):
+        """Lock that serialises every write to this store's shared connection.
+
+        Callers performing their own multi-statement update (for example the
+        document indexer's file-state table) hold this lock so their writes
+        cannot interleave with an in-flight store transaction.
+        """
+        return self._write_lock
+
     def file_digest(self, path):
         row = self.db.execute("SELECT digest FROM files WHERE path=?", (path,)).fetchone()
         return row[0] if row else None
 
     def set_index_metadata(self, key, value):
-        self.db.execute("INSERT OR REPLACE INTO index_metadata VALUES (?, ?)", (key, value))
-        self.db.commit()
+        with self._write_lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO index_metadata VALUES (?, ?)", (key, value))
 
     def index_metadata(self):
         return {row[0]: row[1] for row in self.db.execute("SELECT key, value FROM index_metadata")}
 
     def upsert_file(self, path, digest, chunks, embed=None):
-        self.delete_file(path, commit=False)
-        self.db.execute("INSERT INTO files VALUES (?,?)", (path, digest))
-        for chunk_id, heading, body, line in chunks:
-            vector = (embed or (lambda text: hash_embedding(text, self.dimensions)))(
-                f"{heading} {body}"
-            )
-            vec = ",".join(map(str, vector))
-            self.db.execute(
-                "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
-                (chunk_id, path, heading, body, line, vec),
-            )
-            self.db.execute(
-                "INSERT INTO chunks_fts VALUES (?,?,?,?)", (chunk_id, path, heading, body)
-            )
-        self.db.commit()
+        with self._write_lock, self.db:
+            self._delete_file_no_commit(path)
+            self.db.execute("INSERT INTO files VALUES (?,?)", (path, digest))
+            for chunk_id, heading, body, line in chunks:
+                vector = (embed or (lambda text: hash_embedding(text, self.dimensions)))(
+                    f"{heading} {body}"
+                )
+                vec = ",".join(map(str, vector))
+                self.db.execute(
+                    "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                    (chunk_id, path, heading, body, line, vec),
+                )
+                self.db.execute(
+                    "INSERT INTO chunks_fts VALUES (?,?,?,?)", (chunk_id, path, heading, body)
+                )
 
     def upsert_file_precomputed(self, path, digest, chunks):
         """Atomically replace a file using already-computed vectors.
 
-        Uses explicit BEGIN/COMMIT/ROLLBACK instead of the ``with self.db:``
-        context manager to avoid relying on ``in_transaction`` state, which
-        can desynchronise from the real SQLite transaction when FTS5 virtual
-        tables or concurrent threads are involved.  A threading lock
-        serialises concurrent writes on the shared connection.
+        The whole replacement runs under ``self._write_lock`` and commits via
+        the sqlite3 connection context manager, so no other writer can commit
+        this connection mid-transaction.  The earlier explicit
+        ``BEGIN``/``COMMIT`` form could surface ``cannot commit - no
+        transaction is active`` when a concurrent request committed the shared
+        connection between the last insert and the commit.
         """
-        with self._write_lock:
-            self.db.execute("BEGIN")
-            try:
-                self.delete_file(path, commit=False)
-                self.db.execute("INSERT INTO files VALUES (?,?)", (path, digest))
-                for chunk_id, heading, body, line, vector in chunks:
-                    vec = ",".join(map(str, vector))
-                    self.db.execute(
-                        "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
-                        (chunk_id, path, heading, body, line, vec),
-                    )
-                    self.db.execute(
-                        "INSERT INTO chunks_fts VALUES (?,?,?,?)",
-                        (chunk_id, path, heading, body),
-                    )
-                self.db.execute("COMMIT")
-            except BaseException:
-                self.db.execute("ROLLBACK")
-                raise
+        with self._write_lock, self.db:
+            self._delete_file_no_commit(path)
+            self.db.execute("INSERT INTO files VALUES (?,?)", (path, digest))
+            for chunk_id, heading, body, line, vector in chunks:
+                vec = ",".join(map(str, vector))
+                self.db.execute(
+                    "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                    (chunk_id, path, heading, body, line, vec),
+                )
+                self.db.execute(
+                    "INSERT INTO chunks_fts VALUES (?,?,?,?)",
+                    (chunk_id, path, heading, body),
+                )
 
-    def chunk_ids(self, path):
-        return [row[0] for row in self.db.execute("SELECT id FROM chunks WHERE path=?", (path,))]
-
-    def delete_file(self, path, commit=True):
+    def _delete_file_no_commit(self, path):
+        """Delete *path*'s rows; the caller owns the surrounding transaction."""
         ids = [r[0] for r in self.db.execute("SELECT id FROM chunks WHERE path=?", (path,))]
         self.db.execute("DELETE FROM files WHERE path=?", (path,))
         self.db.execute("DELETE FROM chunks WHERE path=?", (path,))
         for item in ids:
             self.db.execute("DELETE FROM chunks_fts WHERE id=?", (item,))
-        if commit:
-            self.db.commit()
+
+    def chunk_ids(self, path):
+        return [row[0] for row in self.db.execute("SELECT id FROM chunks WHERE path=?", (path,))]
+
+    def delete_file(self, path, commit=True):
+        """Delete *path* under the write lock.
+
+        ``commit=False`` is used by callers that already hold the lock and own
+        the surrounding transaction; committing here would break their
+        atomicity.
+        """
+        with self._write_lock:
+            self._delete_file_no_commit(path)
+            if commit:
+                self.db.commit()
 
     def search(self, query, limit=10):
         if not query.strip():
