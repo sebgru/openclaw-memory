@@ -8,13 +8,17 @@ from urllib.request import Request, urlopen
 class QdrantStore:
     """Minimal Qdrant REST adapter; no SDK or credentials are required."""
 
-    def __init__(self, url, collection="memory", dimensions=128, timeout=10):
+    # Qdrant rejects oversized payloads; batch to stay well under limits.
+    DEFAULT_BATCH_SIZE = 256
+
+    def __init__(self, url, collection="memory", dimensions=128, timeout=10, batch_size=None):
         self.base, self.collection, self.dimensions, self.timeout = (
             url.rstrip("/"),
             collection,
             dimensions,
             timeout,
         )
+        self.batch_size = batch_size or self.DEFAULT_BATCH_SIZE
 
     def _request(self, method, path, payload=None):
         data = None if payload is None else json.dumps(payload).encode()
@@ -55,9 +59,7 @@ class QdrantStore:
             }
             for cid, path, heading, body, line in records
         ]
-        self._request(
-            "PUT", "/collections/" + quote(self.collection, safe="") + "/points", {"points": points}
-        )
+        self._upsert_points(points)
 
     def upsert_precomputed(self, records):
         """Upsert records whose embedding vectors were computed by the caller."""
@@ -72,9 +74,14 @@ class QdrantStore:
             }
             for cid, path, heading, body, line, vector in records
         ]
-        self._request(
-            "PUT", "/collections/" + quote(self.collection, safe="") + "/points", {"points": points}
-        )
+        self._upsert_points(points)
+
+    def _upsert_points(self, points):
+        """Send points to Qdrant in batches to avoid oversized requests."""
+        endpoint = "/collections/" + quote(self.collection, safe="") + "/points"
+        for offset in range(0, len(points), self.batch_size):
+            batch = points[offset : offset + self.batch_size]
+            self._request("PUT", endpoint, {"points": batch})
 
     def delete_ids(self, ids):
         if not ids:

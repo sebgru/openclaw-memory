@@ -28,6 +28,8 @@ For a tiered memory layout, including a separate historical session archive and 
 | `SQLITE_PATH` | `memory.db` | SQLite database (FTS5) for indexed state |
 | `QDRANT_URL` | unset | Enables vector search via Qdrant when set |
 | `QDRANT_COLLECTION` | `memory` | Qdrant collection for the main index |
+| `EMBEDDING_URL` | unset | OpenAI-compatible embedding endpoint; the built-in hash embedding is used when unset |
+| `EMBEDDING_MODEL` | `default` | Model name sent to the embedding endpoint |
 | `EMBEDDING_DIMENSIONS` | `128` | Vector dimensions for the embedding function |
 | `ARCHIVE_ROOT` | unset | Enables the archive API; separate SQLite/Qdrant collections |
 | `ARCHIVE_SQLITE_PATH` | `archive.db` | SQLite database for the archive index |
@@ -133,6 +135,29 @@ When Qdrant is configured, SQLite remains the durable source of indexed state an
 3. Re-check: `missing_vectors` should now be `0`.
 
 The endpoint takes a file lock (`<db>.vector-reconcile.lock`), so concurrent calls serialize. Do not schedule it automatically; run it only after diagnostics report missing vectors.
+
+## Index write resilience
+
+Indexing keeps a run progressing when a single file, embedding request, or
+vector write fails:
+
+- **Batched vector writes.** Qdrant upserts are sent in batches of 256 points
+  (`QdrantStore.DEFAULT_BATCH_SIZE`, overridable with the `batch_size`
+  constructor argument) instead of one oversized request, so a corpus with
+  thousands of chunks no longer exceeds Qdrant's request-size limit.
+- **Validated embeddings with retry.** `EmbeddingClient.embed` rejects vectors
+  with the wrong dimension count or non-finite (`NaN`/`Inf`) values, retries the
+  embedding service up to three times with exponential backoff, and falls back
+  to the deterministic hash embedding when every attempt fails so indexing still
+  completes during an embedding outage.
+- **Explicit SQLite transactions.** `SQLiteStore` uses explicit
+  `BEGIN`/`COMMIT`/`ROLLBACK` guarded by a write lock instead of `with self.db:`,
+  avoiding `cannot commit - no transaction is active` errors when FTS5 virtual
+  tables or concurrent threads are involved.
+
+Failures stay visible: per-file errors are recorded and exposed through
+`GET /documents/errors` (and inline in `GET /documents/status`), and the last
+successfully searchable version of a file is retained when a re-index fails.
 
 ## Converted-document deployment
 
