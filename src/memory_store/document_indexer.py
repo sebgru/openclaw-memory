@@ -49,19 +49,20 @@ class DocumentIndexer:
         self._init_state()
 
     def _init_state(self):
-        self.store.db.execute("""
-        CREATE TABLE IF NOT EXISTS document_file_state(
-          path TEXT PRIMARY KEY,
-          digest TEXT,
-          size INTEGER,
-          mtime_ns INTEGER,
-          status TEXT NOT NULL,
-          error TEXT,
-          last_attempt_at TEXT NOT NULL,
-          last_success_at TEXT
-        )
-        """)
-        self.store.db.commit()
+        with self.store.write_lock:
+            self.store.db.execute("""
+            CREATE TABLE IF NOT EXISTS document_file_state(
+              path TEXT PRIMARY KEY,
+              digest TEXT,
+              size INTEGER,
+              mtime_ns INTEGER,
+              status TEXT NOT NULL,
+              error TEXT,
+              last_attempt_at TEXT NOT NULL,
+              last_success_at TEXT
+            )
+            """)
+            self.store.db.commit()
 
     def _state(
         self,
@@ -75,15 +76,16 @@ class DocumentIndexer:
         success=False,
     ):
         now = datetime.now(UTC).isoformat()
-        previous = self.store.db.execute(
-            "SELECT last_success_at FROM document_file_state WHERE path=?", (path,)
-        ).fetchone()
-        last_success = now if success else (previous[0] if previous else None)
-        self.store.db.execute(
-            "INSERT OR REPLACE INTO document_file_state VALUES (?,?,?,?,?,?,?,?)",
-            (path, digest, size, mtime_ns, status, error, now, last_success),
-        )
-        self.store.db.commit()
+        with self.store.write_lock:
+            previous = self.store.db.execute(
+                "SELECT last_success_at FROM document_file_state WHERE path=?", (path,)
+            ).fetchone()
+            last_success = now if success else (previous[0] if previous else None)
+            self.store.db.execute(
+                "INSERT OR REPLACE INTO document_file_state VALUES (?,?,?,?,?,?,?,?)",
+                (path, digest, size, mtime_ns, status, error, now, last_success),
+            )
+            self.store.db.commit()
 
     def _successful_state(self, path):
         return self.store.db.execute(
@@ -180,8 +182,11 @@ class DocumentIndexer:
                     if self.vector_store:
                         self.vector_store.delete_file(rel)
                     self.store.delete_file(rel)
-                    self.store.db.execute("DELETE FROM document_file_state WHERE path=?", (rel,))
-                    self.store.db.commit()
+                    with self.store.write_lock:
+                        self.store.db.execute(
+                            "DELETE FROM document_file_state WHERE path=?", (rel,)
+                        )
+                        self.store.db.commit()
                     stats.removed += 1
                     continue
                 content, digest, stat = discovered[rel]

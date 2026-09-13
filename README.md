@@ -150,10 +150,17 @@ vector write fails:
   embedding service up to three times with exponential backoff, and falls back
   to the deterministic hash embedding when every attempt fails so indexing still
   completes during an embedding outage.
-- **Explicit SQLite transactions.** `SQLiteStore` uses explicit
-  `BEGIN`/`COMMIT`/`ROLLBACK` guarded by a write lock instead of `with self.db:`,
-  avoiding `cannot commit - no transaction is active` errors when FTS5 virtual
-  tables or concurrent threads are involved.
+- **Serialized SQLite writes.** Every `SQLiteStore` mutation
+  (`set_index_metadata`, `upsert_file`, `upsert_file_precomputed`,
+  `delete_file`) runs under a single re-entrant lock (`SQLiteStore.write_lock`)
+  and commits through the sqlite3 connection context manager instead of an
+  explicit `BEGIN`/`COMMIT`/`ROLLBACK`. Because the shared
+  `check_same_thread=False` connection is never committed mid-transaction by
+  another writer, this avoids `cannot commit - no transaction is active` errors,
+  and a failure inside the context manager rolls back automatically. Callers
+  that run their own multi-statement writes — such as the document indexer's
+  `document_file_state` table — hold the same lock so they cannot interleave
+  with an in-flight store transaction.
 
 Failures stay visible: per-file errors are recorded and exposed through
 `GET /documents/errors` (and inline in `GET /documents/status`), and the last
