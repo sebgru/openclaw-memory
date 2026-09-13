@@ -215,6 +215,67 @@ class DocumentIndexerTests(unittest.TestCase):
             self.store.upsert_file_precomputed = original
         self.assertEqual(result.errors, 1)
 
+    def test_errors_returns_structured_diagnostics_for_failed_files(self):
+        (self.root / "bad.md").write_bytes(b"\xff")
+        (self.root / "good.md").write_text("good content")
+        self.indexer.scan()
+        errors = self.indexer.errors()
+        self.assertEqual(len(errors), 1)
+        error = errors[0]
+        self.assertEqual(error["path"], "bad.md")
+        self.assertEqual(error["status"], "error")
+        self.assertIn("error_class", error)
+        self.assertIn("error_message", error)
+        self.assertIsNotNone(error["last_attempt_at"])
+
+    def test_errors_exposes_indexing_failures_with_error_class(self):
+        path = self.root / "fail.md"
+        path.write_text("indexable")
+        self.indexer.scan()
+        path.write_text("new content that will fail")
+        self.vectors.fail = True
+        self.indexer.scan()
+        errors = self.indexer.errors()
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["path"], "fail.md")
+        self.assertEqual(errors[0]["status"], "error")
+        self.assertTrue(len(errors[0]["error_message"]) > 0)
+
+    def test_errors_strips_absolute_paths_from_messages(self):
+        sanitized = DocumentIndexer._sanitize_error_row(
+            (
+                "rel/file.md",
+                "OSError: /secret/data/path/file.txt not found",
+                "2026-01-01T00:00:00",
+                None,
+                "error",
+            )
+        )
+        self.assertNotIn("/secret", sanitized["error_message"])
+        self.assertEqual(sanitized["error_class"], "OSError")
+        self.assertIn("<path>", sanitized["error_message"])
+
+    def test_errors_truncates_long_messages(self):
+        long_msg = "x" * 5000
+        sanitized = DocumentIndexer._sanitize_error_row(
+            ("file.md", long_msg, "2026-01-01T00:00:00", None, "error")
+        )
+        self.assertLessEqual(len(sanitized["error_message"]), 1000)
+
+    def test_errors_limit_validation(self):
+        with self.assertRaises(ValueError):
+            self.indexer.errors(limit=0)
+        with self.assertRaises(ValueError):
+            self.indexer.errors(limit=1001)
+
+    def test_status_includes_error_details(self):
+        (self.root / "broken.md").write_bytes(b"\xff")
+        self.indexer.scan()
+        status = self.indexer.status()
+        self.assertEqual(status["files_with_errors"], 1)
+        self.assertEqual(len(status["errors"]), 1)
+        self.assertEqual(status["errors"][0]["path"], "broken.md")
+
 
 class DocumentApiTests(unittest.TestCase):
     @classmethod
@@ -322,6 +383,41 @@ class DocumentApiTests(unittest.TestCase):
         finally:
             server.documents_vector_store = original
 
+    def test_document_errors_endpoint_returns_empty_when_no_failures(self):
+        self.request("POST", "/documents/index", {"max_files": 10})
+        status, body = self.request("GET", "/documents/errors")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(body["errors"], list)
+
+    def test_document_errors_endpoint_exposes_failed_files(self):
+        (self.root / "api-bad.md").write_bytes(b"\xff")
+        self.request("POST", "/documents/index", {"max_files": 10})
+        status, body = self.request("GET", "/documents/errors")
+        self.assertEqual(status, 200)
+        paths = [item["path"] for item in body["errors"]]
+        self.assertIn("api-bad.md", paths)
+        for item in body["errors"]:
+            self.assertIn("status", item)
+            self.assertIn("error_class", item)
+            self.assertIn("error_message", item)
+            self.assertIn("last_attempt_at", item)
+            self.assertIn("last_success_at", item)
+
+    def test_document_errors_limit_validation(self):
+        status, body = self.request("GET", "/documents/errors?limit=0")
+        self.assertEqual(status, 400)
+        status, body = self.request("GET", "/documents/errors?limit=abc")
+        self.assertEqual(status, 400)
+
+    def test_document_status_includes_error_list(self):
+        (self.root / "status-err.md").write_bytes(b"\xff")
+        self.request("POST", "/documents/index", {"max_files": 10})
+        status, body = self.request("GET", "/documents/status")
+        self.assertEqual(status, 200)
+        self.assertIn("errors", body)
+        self.assertIsInstance(body["errors"], list)
+        self.assertGreaterEqual(body["files_with_errors"], 1)
+
 
 class DocumentConfigurationTests(unittest.TestCase):
     def test_document_scope_rejects_missing_configuration(self):
@@ -352,6 +448,7 @@ class DocumentConfigurationTests(unittest.TestCase):
         try:
             for method, path in (
                 ("GET", "/documents/status"),
+                ("GET", "/documents/errors"),
                 ("GET", "/documents/search?q=x"),
                 ("POST", "/documents/index"),
             ):

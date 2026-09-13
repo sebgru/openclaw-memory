@@ -237,10 +237,63 @@ class DocumentIndexer:
                 stats.errors += 1
         return stats
 
+    def errors(self, limit=100):
+        """Return structured details for files that failed indexing.
+
+        Exposes the exact relative paths, sanitized error class and message,
+        attempt timestamps, and current status.  Error text is truncated and
+        stripped of absolute path prefixes to avoid leaking filesystem layout.
+        """
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        rows = self.store.db.execute(
+            "SELECT path, error, last_attempt_at, last_success_at, status "
+            "FROM document_file_state WHERE status='error' "
+            "ORDER BY last_attempt_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [self._sanitize_error_row(row) for row in rows]
+
+    @staticmethod
+    def _sanitize_error_row(row):
+        path, error, last_attempt_at, last_success_at, status = row
+        error_class = "UnknownError"
+        error_message = error or ""
+        # Extract exception class name when the stored error looks like
+        # "ClassName: message" (the format used by str(exc) for most stdlib
+        # and built-in exceptions).
+        if error and ": " in error:
+            head, _, tail = error.partition(": ")
+            if head.isidentifier():
+                error_class = head
+                error_message = tail
+        elif error:
+            error_message = error
+        # Strip any residual absolute paths from the message to avoid
+        # leaking host filesystem layout.
+        error_message = DocumentIndexer._strip_absolute_paths(error_message)
+        # Truncate to a safe bound so a pathological message cannot bloat
+        # the diagnostic payload.
+        error_message = error_message[:1000]
+        return {
+            "path": path,
+            "status": status,
+            "error_class": error_class,
+            "error_message": error_message,
+            "last_attempt_at": last_attempt_at,
+            "last_success_at": last_success_at,
+        }
+
+    @staticmethod
+    def _strip_absolute_paths(text):
+        import re
+
+        return re.sub(r"/[A-Za-z0-9_./ -]+", "<path>", text)
+
     def status(self):
         result = self.store.status()
-        result["files_with_errors"] = self.store.db.execute(
-            "SELECT count(*) FROM document_file_state WHERE status='error'"
-        ).fetchone()[0]
+        error_rows = self.errors()
+        result["files_with_errors"] = len(error_rows)
+        result["errors"] = error_rows
         result["pending_hint"] = "run another bounded index batch until pending is zero"
         return result
