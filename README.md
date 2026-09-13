@@ -167,7 +167,9 @@ Failures stay visible: per-file errors are recorded and exposed through
 successfully searchable version of a file is retained when a re-index fails.
 Failed paths are retried on the next scan even when their content digest is
 unchanged, so a transient failure after a successful index cannot leave
-`files_with_errors` reporting that file forever.
+`files_with_errors` reporting that file forever. State rows whose path is no
+longer on disk and was never indexed are purged during the same scan, so a
+deleted or renamed file cannot pin `files_with_errors` above zero either.
 
 ## Converted-document deployment
 
