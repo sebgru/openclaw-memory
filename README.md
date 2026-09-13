@@ -165,6 +165,9 @@ vector write fails:
 Failures stay visible: per-file errors are recorded and exposed through
 `GET /documents/errors` (and inline in `GET /documents/status`), and the last
 successfully searchable version of a file is retained when a re-index fails.
+Failed paths are retried on the next scan even when their content digest is
+unchanged, so a transient failure after a successful index cannot leave
+`files_with_errors` reporting that file forever.
 
 ## Converted-document deployment
 
