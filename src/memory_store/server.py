@@ -374,6 +374,24 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     status["vectors"] = {"status": "error", "error": str(exc)}
             return self.send_json(200, status)
+        if parsed.path == "/documents/errors":
+            if not documents_store:
+                return self.send_json(404, {"error": "documents are not configured"})
+            try:
+                limit = int(params.get("limit", [100])[0])
+            except ValueError:
+                return self.send_json(400, {"error": "limit must be an integer"})
+            if not 1 <= limit <= 1000:
+                return self.send_json(400, {"error": "limit must be between 1 and 1000"})
+            indexer = DocumentIndexer(
+                DOCUMENTS_ROOT,
+                documents_store,
+                documents_vector_store,
+                embedder.embed,
+                include_patterns=DOCUMENTS_INCLUDE_PATTERNS,
+                exclude_patterns=DOCUMENTS_EXCLUDE_PATTERNS,
+            )
+            return self.send_json(200, {"errors": indexer.errors(limit=limit)})
         if parsed.path == "/promotion/candidates":
             return self.send_json(200, {"candidates": candidates(ROOT)})
         if parsed.path == "/archive/status":
