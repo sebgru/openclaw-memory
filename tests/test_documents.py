@@ -276,6 +276,40 @@ class DocumentIndexerTests(unittest.TestCase):
         self.assertEqual(len(status["errors"]), 1)
         self.assertEqual(status["errors"][0]["path"], "broken.md")
 
+    def test_stale_error_state_is_retried_when_content_is_unchanged(self):
+        """A transient failure recorded after a successful index must not pin a
+        file at ``status='error'`` forever (regression: U8 document error)."""
+        path = self.root / "u8.md"
+        path.write_text("# U8\nunchanged searchable body")
+        self.indexer.scan()
+        self.assertEqual(self.indexer.status()["files_with_errors"], 0)
+
+        # Reproduce the live symptom: the stored digest stays valid while a later
+        # attempt fails, leaving ``last_success_at`` set but ``status='error'``.
+        self.indexer._state(
+            "u8.md",
+            digest=self.store.file_digest("u8.md"),
+            status="error",
+            error="OperationalError: cannot commit - no transaction is active",
+        )
+        self.assertEqual(self.indexer.status()["files_with_errors"], 1)
+
+        result = self.indexer.scan()
+        self.assertEqual(result.errors, 0)
+        self.assertEqual(result.unchanged, 0)
+        self.assertEqual(result.changed, 1)
+        self.assertEqual(self.indexer.status()["files_with_errors"], 0)
+        self.assertEqual(self.store.search("unchanged", 1)[0]["path"], "u8.md")
+
+    def test_persistent_failure_stays_recorded_across_scans(self):
+        """Retrying errored paths must not hide a file that never indexes."""
+        (self.root / "broken.md").write_bytes(b"\xff")
+        self.indexer.scan()
+        self.assertEqual(self.indexer.status()["files_with_errors"], 1)
+        second = self.indexer.scan()
+        self.assertEqual(second.errors, 1)
+        self.assertEqual(self.indexer.status()["files_with_errors"], 1)
+
 
 class DocumentApiTests(unittest.TestCase):
     @classmethod

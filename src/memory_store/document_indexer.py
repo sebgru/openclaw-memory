@@ -160,10 +160,21 @@ class DocumentIndexer:
                 failures[rel] = str(exc)
 
         existing = {row[0] for row in self.store.db.execute("SELECT path FROM files")}
+        # Files whose last recorded attempt failed must be retried even when the
+        # stored content digest is unchanged: a successful earlier index leaves
+        # the path in ``files``, so a later transient failure would otherwise
+        # pin ``document_file_state`` at ``status='error'`` forever and be
+        # reported by ``/documents/status`` indefinitely.
+        retry = {
+            row[0]
+            for row in self.store.db.execute(
+                "SELECT path FROM document_file_state WHERE status != 'ok'"
+            )
+        }
         changes = [
             rel
             for rel, (_, digest, _) in discovered.items()
-            if self.store.file_digest(rel) != digest
+            if rel in retry or self.store.file_digest(rel) != digest
         ]
         removals = sorted(existing - set(discovered) - set(failures))
         stats.unchanged = len(discovered) - len(changes)
