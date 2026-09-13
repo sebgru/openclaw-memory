@@ -243,7 +243,13 @@ class DocumentIndexerTests(unittest.TestCase):
 
     def test_errors_strips_absolute_paths_from_messages(self):
         sanitized = DocumentIndexer._sanitize_error_row(
-            ("rel/file.md", "OSError: /secret/data/path/file.txt not found", "2026-01-01T00:00:00", None, "error")
+            (
+                "rel/file.md",
+                "OSError: /secret/data/path/file.txt not found",
+                "2026-01-01T00:00:00",
+                None,
+                "error",
+            )
         )
         self.assertNotIn("/secret", sanitized["error_message"])
         self.assertEqual(sanitized["error_class"], "OSError")

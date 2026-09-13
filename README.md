@@ -86,6 +86,14 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
   resumable. It detects new, changed, renamed, and deleted paths, isolates
   per-file errors, and retains the last successfully searchable version when a
   read, embedding, or vector write fails.
+- `GET /documents/errors?limit=100` exposes the files that failed indexing
+  without requiring direct database access. Each entry carries the exact
+  relative `path`, `status`, the sanitized `error_class` and `error_message`
+  (absolute path prefixes are stripped and messages are truncated to 1000
+  characters), and the `last_attempt_at`/`last_success_at` timestamps. `limit`
+  is bounded to 1–1000; the endpoint returns `404` when the document corpus is
+  not configured. `GET /documents/status` includes the same list inline as
+  `errors` together with the `files_with_errors` count.
 - `POST /documents/reconcile` uses the same explicit `{"confirm":true}` vector
   repair contract as the main/archive reconciliation endpoints.
 - `GET /status` (and `/healthz`) report SQLite integrity, index freshness (`last_index_started_at`, `last_index_completed_at`, `last_index_error`, `age_seconds`), and — when Qdrant is configured — vector parity diagnostics (`points`, `chunks`, `missing_vectors`).
