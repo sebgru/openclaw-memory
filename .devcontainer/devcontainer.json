@@ -13,9 +13,11 @@
     "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
     "mounts": [
         "source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/tmp/host-gitconfig,type=bind,readonly",
-        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/tmp/host-ssh,type=bind,readonly"
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/tmp/host-ssh,type=bind,readonly",
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.config/gh,target=/home/vscode/.config/gh,type=bind"
     ],
     "postCreateCommand": "bash .devcontainer/setup.sh",
+    "postStartCommand": "sudo chown -R vscode:vscode /home/vscode/.config/gh && echo '--- gh auth status ---' && gh auth status || echo 'WARNING: gh is not logged in - run gh auth login'",
     "customizations": {
         "vscode": {
             "extensions": [
