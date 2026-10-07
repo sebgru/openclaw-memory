@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -107,7 +108,13 @@ PROMPT_SOURCE_QUOTAS = {
 }
 
 
+# Per-thread flag so unified search can report a lexical-only fallback without
+# changing hybrid_search's return shape.
+_search_state = threading.local()
+
+
 def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFAULT_VECTOR):
+    _search_state.lexical_fallback = False
     selected_store = selected_store or store
     selected_vector_store = (
         vector_store if selected_vector_store is _DEFAULT_VECTOR else selected_vector_store
@@ -121,6 +128,7 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         )
     except Exception as exc:
         logger.warning("semantic search unavailable, falling back to FTS: %s", exc)
+        _search_state.lexical_fallback = True
         semantic = []
     merged: dict = {}
     max_lexical_evidence = max((max(0.0, row.get("score", 0.0)) for row in lexical), default=0)
@@ -259,8 +267,25 @@ def apply_search_profile(results, limit, profile):
     return selected
 
 
+COVERAGE_SOURCES = ("main", "archive", "documents")
+
+
 def unified_search(query, limit, scope="all", profile="tool"):
-    """Search the configured main/archive indexes and merge partial results."""
+    """Search the configured indexes; return ``(results, warnings)``."""
+    results, warnings, *_ = unified_search_with_coverage(query, limit, scope, profile)
+    return results, warnings
+
+
+def unified_search_with_coverage(query, limit, scope="all", profile="tool"):
+    """Search the configured indexes and report what was actually searched.
+
+    Returns ``(results, warnings, coverage, degraded)``. ``degraded`` maps a searched
+    source to ``lexical_fallback`` when semantic search failed and only FTS ran.
+    ``coverage`` maps each of
+    main/archive/documents to ``searched`` (backend ran without error),
+    ``unavailable`` (requested by scope but not configured or failed) or
+    ``not_searched`` (excluded by scope).
+    """
     if scope not in {"all", "main", "archive", "documents"}:
         raise ValueError("scope must be one of all, main, archive, documents")
     if profile not in {"tool", "prompt"}:
@@ -273,6 +298,8 @@ def unified_search(query, limit, scope="all", profile="tool"):
     warnings = []
     merged: dict[str, dict] = {}
     backends = []
+    coverage = dict.fromkeys(COVERAGE_SOURCES, "not_searched")
+    degraded: dict[str, str] = {}
     if scope in {"all", "main"}:
         backends.append(("main", store, vector_store, False, False))
     if scope in {"all", "archive"}:
@@ -280,17 +307,29 @@ def unified_search(query, limit, scope="all", profile="tool"):
             backends.append(("archive", archive_store, archive_vector_store, True, False))
         else:
             warnings.append("archive: not configured")
+            coverage["archive"] = "unavailable"
 
-    if scope in {"all", "documents"} and documents_store:
-        backends.append(("documents", documents_store, documents_vector_store, False, True))
+    if scope in {"all", "documents"}:
+        if documents_store:
+            backends.append(("documents", documents_store, documents_vector_store, False, True))
+        else:
+            warnings.append("documents: not configured")
+            coverage["documents"] = "unavailable"
 
     for name, selected_store, selected_vector_store, is_archive, is_document in backends:
+        _search_state.lexical_fallback = False
         try:
             rows = hybrid_search(query, limit * 3, selected_store, selected_vector_store)
         except Exception as exc:
             logger.warning("unified %s search unavailable: %s", name, exc)
             warnings.append(f"{name}: search backend unavailable")
+            coverage[name] = "unavailable"
             continue
+        coverage[name] = "searched"
+        if getattr(_search_state, "lexical_fallback", False):
+            degraded[name] = "lexical_fallback"
+            # Searched successfully, but without semantic matching; say so.
+            warnings.append(f"{name}: semantic search unavailable, lexical (FTS) fallback used")
         for row in rows:
             source = unified_source(row, archive=is_archive, document=is_document)
             result_id = unified_result_id(row, source)
@@ -321,7 +360,7 @@ def unified_search(query, limit, scope="all", profile="tool"):
                 item[field] = max(item[field], row.get(field, 0))
 
     results = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
-    return apply_search_profile(results, limit, profile), warnings
+    return apply_search_profile(results, limit, profile), warnings, coverage, degraded
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -475,10 +514,10 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 # Keep the long-standing three-argument call shape for the
                 # default profile; callers and test doubles remain compatible.
-                results, warnings = (
-                    unified_search(query, limit, scope)
+                results, warnings, coverage, degraded = (
+                    unified_search_with_coverage(query, limit, scope)
                     if profile == "tool"
-                    else unified_search(query, limit, scope, profile)
+                    else unified_search_with_coverage(query, limit, scope, profile)
                 )
             except LookupError as exc:
                 return self.send_json(404, {"error": str(exc)})
@@ -492,7 +531,9 @@ class Handler(BaseHTTPRequestHandler):
                 len(warnings),
                 (time.monotonic() - started) * 1000,
             )
-            payload = {"results": results}
+            payload = {"results": results, "coverage": coverage}
+            if degraded:
+                payload["degraded"] = degraded
             if warnings:
                 payload["warnings"] = warnings
             return self.send_json(200, payload)

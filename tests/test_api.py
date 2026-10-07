@@ -109,7 +109,7 @@ class ApiTests(unittest.TestCase):
 
             server.hybrid_search = fake_hybrid
             results, warnings = server.unified_search("same", 10)
-            self.assertEqual(warnings, [])
+            self.assertEqual(warnings, ["documents: not configured"])
             self.assertEqual(len(results), 2)
             self.assertEqual({row["source"] for row in results}, {"artifact", "archive"})
             self.assertTrue(all(len(row["id"]) == 64 for row in results))
@@ -150,7 +150,9 @@ class ApiTests(unittest.TestCase):
             results, warnings = server.unified_search("fact", 10)
             self.assertEqual(len(results), 1)
             self.assertEqual(results[0]["source"], "archive")
-            self.assertEqual(warnings, ["main: search backend unavailable"])
+            self.assertEqual(
+                warnings, ["documents: not configured", "main: search backend unavailable"]
+            )
         finally:
             server.hybrid_search = original_hybrid
             server.archive_store = original_archive
@@ -181,7 +183,7 @@ class ApiTests(unittest.TestCase):
 
             server.hybrid_search = fake_hybrid
             results, warnings = server.unified_search("architecture", 10)
-            self.assertEqual(warnings, [])
+            self.assertEqual(warnings, ["documents: not configured"])
             self.assertEqual(len(results), 1)
             self.assertEqual(len(results[0]["alternate_provenance"]), 1)
             self.assertEqual(results[0]["score"], 0.3)
@@ -301,7 +303,7 @@ class ApiTests(unittest.TestCase):
 
             server.hybrid_search = fake_hybrid
             results, warnings = server.unified_search("fact", 10, "all")
-            self.assertEqual(warnings, ["archive: not configured"])
+            self.assertEqual(warnings, ["archive: not configured", "documents: not configured"])
             self.assertEqual(len(results), 1)
             self.assertEqual(results[0]["source"], "memory")
         finally:
@@ -332,7 +334,9 @@ class ApiTests(unittest.TestCase):
 
             server.hybrid_search = fake_hybrid
             results, warnings = server.unified_search("fact", 10)
-            self.assertEqual(warnings, ["archive: search backend unavailable"])
+            self.assertEqual(
+                warnings, ["documents: not configured", "archive: search backend unavailable"]
+            )
             self.assertEqual(len(results), 1)
             self.assertEqual(results[0]["source"], "memory")
         finally:
@@ -356,31 +360,186 @@ class ApiTests(unittest.TestCase):
             server.archive_store = original_archive
 
     def test_unified_endpoint_omits_warnings_when_empty(self):
-        original = server.unified_search
+        original = server.unified_search_with_coverage
         try:
-            server.unified_search = lambda query, limit, scope: (
+            server.unified_search_with_coverage = lambda query, limit, scope: (
                 [{"id": "stable", "source": "memory", "score": 1}],
                 [],
+                {"main": "searched", "archive": "not_searched", "documents": "not_searched"},
+                {},
             )
             status, payload = self.request_json("/unified/search?q=fact")
             self.assertEqual(status, 200)
             self.assertNotIn("warnings", payload)
+            self.assertNotIn("degraded", payload)
+            self.assertEqual(payload["coverage"]["main"], "searched")
         finally:
-            server.unified_search = original
+            server.unified_search_with_coverage = original
 
     def test_unified_endpoint_returns_results_and_warnings(self):
-        original = server.unified_search
+        original = server.unified_search_with_coverage
         try:
-            server.unified_search = lambda query, limit, scope: (
+            server.unified_search_with_coverage = lambda query, limit, scope: (
                 [{"id": "stable", "source": "memory", "score": 1}],
                 ["archive: search backend unavailable"],
+                {"main": "searched", "archive": "unavailable", "documents": "not_searched"},
+                {},
             )
             status, payload = self.request_json("/unified/search?q=fact&scope=main&limit=2")
             self.assertEqual(status, 200)
             self.assertEqual(payload["results"][0]["id"], "stable")
             self.assertEqual(payload["warnings"], ["archive: search backend unavailable"])
         finally:
-            server.unified_search = original
+            server.unified_search_with_coverage = original
+
+    def _coverage_fixture(self, failing=()):
+        class Store:
+            def __init__(self, name, fail):
+                self.name, self.fail, self.calls = name, fail, 0
+
+            def search(self, query, limit):
+                self.calls += 1
+                if self.fail:
+                    raise RuntimeError("boom")
+                return [{"id": self.name, "text": "fact", "path": f"{self.name}.md", "score": 1.0}]
+
+        return {n: Store(n, n in failing) for n in ("main", "archive", "documents")}
+
+    def _with_stores(self, stores, archive=True, documents=True):
+        saved = (
+            server.store,
+            server.archive_store,
+            server.documents_store,
+            server.vector_store,
+            server.archive_vector_store,
+            server.documents_vector_store,
+        )
+        server.store = stores["main"]
+        server.archive_store = stores["archive"] if archive else None
+        server.documents_store = stores["documents"] if documents else None
+        server.vector_store = server.archive_vector_store = server.documents_vector_store = None
+        return saved
+
+    def _restore(self, saved):
+        (
+            server.store,
+            server.archive_store,
+            server.documents_store,
+            server.vector_store,
+            server.archive_vector_store,
+            server.documents_vector_store,
+        ) = saved
+
+    def test_coverage_full(self):
+        stores = self._coverage_fixture()
+        saved = self._with_stores(stores)
+        try:
+            status, payload = self.request_json("/unified/search?q=fact&scope=all")
+        finally:
+            self._restore(saved)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            payload["coverage"],
+            {"main": "searched", "archive": "searched", "documents": "searched"},
+        )
+        self.assertNotIn("warnings", payload)
+
+    def test_coverage_partial_unconfigured_backends(self):
+        stores = self._coverage_fixture()
+        saved = self._with_stores(stores, archive=False, documents=False)
+        try:
+            status, payload = self.request_json("/unified/search?q=fact&scope=all")
+        finally:
+            self._restore(saved)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            payload["coverage"],
+            {"main": "searched", "archive": "unavailable", "documents": "unavailable"},
+        )
+        self.assertEqual(
+            payload["warnings"], ["archive: not configured", "documents: not configured"]
+        )
+
+    def test_coverage_failed_backend_is_unavailable_despite_200(self):
+        stores = self._coverage_fixture(failing=("archive",))
+        saved = self._with_stores(stores)
+        try:
+            status, payload = self.request_json("/unified/search?q=fact&scope=all")
+        finally:
+            self._restore(saved)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            payload["coverage"],
+            {"main": "searched", "archive": "unavailable", "documents": "searched"},
+        )
+        self.assertEqual(payload["warnings"], ["archive: search backend unavailable"])
+
+    def test_coverage_not_requested_backends_are_not_run(self):
+        stores = self._coverage_fixture()
+        saved = self._with_stores(stores)
+        try:
+            status, payload = self.request_json("/unified/search?q=fact&scope=main")
+        finally:
+            self._restore(saved)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            payload["coverage"],
+            {"main": "searched", "archive": "not_searched", "documents": "not_searched"},
+        )
+        self.assertEqual(
+            (stores["main"].calls, stores["archive"].calls, stores["documents"].calls), (1, 0, 0)
+        )
+
+    def test_coverage_unconfigured_documents_scope_stays_404(self):
+        stores = self._coverage_fixture()
+        saved = self._with_stores(stores, documents=False)
+        try:
+            status, _ = self.request_json("/unified/search?q=fact&scope=documents")
+        finally:
+            self._restore(saved)
+        self.assertEqual(status, 404)
+
+    def test_unified_semantic_failure_warns_lexical_fallback(self):
+        class FailingVectors:
+            def search(self, vector, limit):
+                raise RuntimeError("qdrant down")
+
+        stores = self._coverage_fixture()
+        saved = self._with_stores(stores)
+        server.vector_store = FailingVectors()
+        try:
+            status, payload = self.request_json("/unified/search?q=fact&scope=all")
+        finally:
+            self._restore(saved)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            payload["coverage"],
+            {"main": "searched", "archive": "searched", "documents": "searched"},
+        )
+        self.assertEqual(
+            payload["warnings"],
+            ["main: semantic search unavailable, lexical (FTS) fallback used"],
+        )
+        self.assertEqual(payload["degraded"], {"main": "lexical_fallback"})
+        self.assertTrue(payload["results"])
+
+    def test_unified_fallback_flag_does_not_leak_between_backends(self):
+        class FailingVectors:
+            def search(self, vector, limit):
+                raise RuntimeError("qdrant down")
+
+        stores = self._coverage_fixture()
+        saved = self._with_stores(stores)
+        server.archive_vector_store = FailingVectors()
+        try:
+            _, payload = self.request_json("/unified/search?q=fact&scope=all")
+        finally:
+            self._restore(saved)
+        self.assertEqual(
+            payload["warnings"],
+            ["archive: semantic search unavailable, lexical (FTS) fallback used"],
+        )
+        self.assertEqual(payload["degraded"], {"archive": "lexical_fallback"})
 
 
 if __name__ == "__main__":
