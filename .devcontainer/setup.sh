@@ -44,6 +44,35 @@ else
     echo "  No SSH keys found on host — skipping."
 fi
 
+# ── Commit signing ────────────────────────────────────────────────────────────
+# A host .gitconfig commonly enables SSH commit signing with
+# `user.signingkey ~/.ssh/id_rsa.pub`. The private key normally lives in the
+# forwarded ssh-agent rather than on disk, so that public key file ships from
+# the host's .ssh directory only when the keypair is stored there too. Without
+# it, ssh-keygen cannot resolve the key and every commit fails with
+# "Couldn't load public key … No such file or directory". Materialize the
+# public key from the agent so signing works either way.
+echo "→ Configuring commit signing…"
+if [ "$(git config --get gpg.format 2>/dev/null || true)" = "ssh" ]; then
+    signing_key="$(git config --get user.signingkey 2>/dev/null || true)"
+    signing_key="${signing_key/#\~/$HOME}"
+    if [ -n "$signing_key" ] && [ ! -f "$signing_key" ]; then
+        mkdir -p "$(dirname "$signing_key")"
+        if ssh-add -L > "$signing_key" 2>/dev/null && [ -s "$signing_key" ]; then
+            chmod 644 "$signing_key"
+            echo "  Public key written from ssh-agent: $signing_key"
+        else
+            rm -f "$signing_key"
+            echo "  WARNING: no keys in ssh-agent — commit signing will fail."
+            echo "           Forward a key (ssh-add) or set commit.gpgsign=false."
+        fi
+    else
+        echo "  Signing key already present or not configured — skipping."
+    fi
+else
+    echo "  SSH commit signing not configured — skipping."
+fi
+
 echo ""
 echo "✅ Container setup complete."
 echo "   Workspace : /workspace"
