@@ -70,6 +70,19 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
   lexical/semantic score contributions. If one selected backend fails, the
   response remains successful with a `warnings` array describing the partial
   result set.
+- `/unified/search` also returns a `coverage` object with `main`, `archive`
+  and `documents` keys, each `searched` (the backend ran without error),
+  `unavailable` (selected by `scope` but not configured, or the backend
+  failed) or `not_searched` (excluded by `scope`). It reflects actual backend
+  calls, not the HTTP status. A `searched` backend may still have run
+  lexically only: this is expected when no semantic backend is configured;
+  when a configured semantic search fails, that is reported as a
+  `<source>: semantic search unavailable, lexical (FTS) fallback used` warning
+  while coverage stays `searched`. A top-level `degraded` object (for example
+  `{"main": "lexical_fallback"}`) marks those sources too, so `searched` is not
+  read as semantic-complete; it is omitted when nothing degraded. An unconfigured source selected by `scope`
+  also adds `<source>: not configured`, so clients that ignore `coverage`
+  still see the gap. Clients that ignore unknown fields are unaffected.
 - `profile=tool` preserves the broad, backward-compatible result set.
   `profile=prompt` applies normalized evidence thresholds and per-source quotas
   so automatic recall cannot be dominated by one corpus. Thresholds apply to
@@ -124,9 +137,9 @@ override to inherit future safe defaults.
 
 ## Logging
 
-The service logs to stdout: startup configuration, HTTP access lines, search outcomes (query, limit, result count, latency), index outcomes (added/changed/removed/unchanged counts), per-file indexer decisions, and errors with tracebacks. `LOG_LEVEL` controls verbosity (`INFO` by default; set `DEBUG` to also log unchanged files during indexing). Semantic-search failures that fall back to FTS5 are logged as warnings.
+The service logs to stdout: startup configuration, HTTP access lines, search outcomes (query, limit, result count, latency), index outcomes (added/changed/removed/unchanged counts), per-file indexer decisions, and errors with tracebacks. `LOG_LEVEL` controls verbosity (`INFO` by default; set `DEBUG` to also log unchanged files during indexing). Semantic-search failures that fall back to FTS5 are logged as warnings and, on `/unified/search`, surfaced in `warnings`.
 
-When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale. `/status` and `/archive/status` expose index timestamps/errors and point/chunk parity diagnostics. Use the explicit, locked reconciliation endpoint to add missing points; it never deletes points. Search falls back to SQLite FTS5 during a Qdrant or embedding outage.
+When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale. `/status` and `/archive/status` expose index timestamps/errors and point/chunk parity diagnostics. Use the explicit, locked reconciliation endpoint to add missing points; it never deletes points. Search falls back to SQLite FTS5 during a Qdrant or embedding outage. `/unified/search` reports this per source as a warning (coverage stays `searched`).
 
 ### Reconciliation workflow
 
