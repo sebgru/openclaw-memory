@@ -6,10 +6,10 @@ import sqlite3
 from pathlib import Path
 
 
-def verify_database(path: str | Path) -> dict[str, str]:
+def verify_database(path: str | Path, timeout: float = 5.0) -> dict[str, str]:
     """Run SQLite's integrity check and return a machine-readable result."""
     try:
-        with sqlite3.connect(str(path)) as db:
+        with sqlite3.connect(str(path), timeout=timeout) as db:
             result = db.execute("PRAGMA integrity_check").fetchone()[0]
     except sqlite3.DatabaseError as exc:
         return {"status": "error", "integrity": str(exc)}

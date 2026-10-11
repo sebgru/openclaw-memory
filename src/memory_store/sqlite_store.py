@@ -28,6 +28,11 @@ class SQLiteStore:
         self.read_timeout = _default_read_timeout() if read_timeout is None else read_timeout
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        # Cache the database filename while the store is being initialized.
+        # Read-only document handlers must not query the shared connection just
+        # to discover the lock-file path: that connection may be occupied by
+        # a long-running index transaction.
+        self.database_path = self.db.execute("PRAGMA database_list").fetchone()[2]
         self.dimensions = dimensions
         # Re-entrant lock guarding every write on this shared connection.
         # A multi-statement transaction (``upsert_file_precomputed``) must not
@@ -60,8 +65,11 @@ class SQLiteStore:
         with self._write_lock, self.db:
             self.db.execute("INSERT OR REPLACE INTO index_metadata VALUES (?, ?)", (key, value))
 
-    def index_metadata(self):
-        return {row[0]: row[1] for row in self.db.execute("SELECT key, value FROM index_metadata")}
+    def index_metadata(self, db=None):
+        return {
+            row[0]: row[1]
+            for row in (db or self.db).execute("SELECT key, value FROM index_metadata")
+        }
 
     def upsert_file(self, path, digest, chunks, embed=None):
         with self._write_lock, self.db:
@@ -174,14 +182,16 @@ class SQLiteStore:
         row = self.db.execute("SELECT vector FROM chunks WHERE id=?", (chunk_id,)).fetchone()
         return [float(x) for x in row[0].split(",")] if row else None
 
-    def status(self):
-        metadata = self.index_metadata()
-        chunk_count = self.db.execute("SELECT count(*) FROM chunks").fetchone()[0]
-        fts_count = self.db.execute("SELECT count(*) FROM chunks_fts").fetchone()[0]
-        missing_fts = self.db.execute(
+    def status(self, db=None):
+        """Return index counts; pass a ``_read_connection()`` handle to avoid the shared one."""
+        db = db or self.db
+        metadata = self.index_metadata(db)
+        chunk_count = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
+        fts_count = db.execute("SELECT count(*) FROM chunks_fts").fetchone()[0]
+        missing_fts = db.execute(
             "SELECT count(*) FROM chunks c LEFT JOIN chunks_fts f ON f.id=c.id WHERE f.id IS NULL"
         ).fetchone()[0]
-        orphaned_fts = self.db.execute(
+        orphaned_fts = db.execute(
             "SELECT count(*) FROM chunks_fts f LEFT JOIN chunks c ON c.id=f.id WHERE c.id IS NULL"
         ).fetchone()[0]
         age = None
@@ -197,7 +207,7 @@ class SQLiteStore:
             except ValueError:
                 pass
         return {
-            "files": self.db.execute("SELECT count(*) FROM files").fetchone()[0],
+            "files": db.execute("SELECT count(*) FROM files").fetchone()[0],
             "chunks": chunk_count,
             "lexicalIndex": {
                 "chunks": fts_count,

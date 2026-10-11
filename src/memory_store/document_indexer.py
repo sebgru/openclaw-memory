@@ -2,6 +2,9 @@ import fcntl
 import fnmatch
 import hashlib
 import logging
+import os
+import sqlite3
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +12,17 @@ from pathlib import Path
 from .chunker import chunk_markdown
 
 logger = logging.getLogger("memory_store.documents")
+
+
+class IndexBusyError(RuntimeError):
+    """Another document index run holds the scan lock."""
+
+
+def _lock_wait_seconds():
+    try:
+        return max(0.0, float(os.getenv("DOCUMENTS_INDEX_LOCK_TIMEOUT_SECONDS", "0")))
+    except ValueError:
+        return 0.0
 
 
 @dataclass
@@ -36,7 +50,9 @@ class DocumentIndexer:
         chunk_size=1600,
         include_patterns=("**/*.md",),
         exclude_patterns=(),
+        read_only=False,
     ):
+        """``read_only`` skips schema creation so status/errors perform no DDL or writes."""
         self.root = Path(root)
         self.store = store
         self.vector_store = vector_store
@@ -44,9 +60,13 @@ class DocumentIndexer:
         self.chunk_size = chunk_size
         self.include_patterns = tuple(include_patterns)
         self.exclude_patterns = tuple(exclude_patterns)
-        db_path = store.db.execute("PRAGMA database_list").fetchone()[2]
+        db_path = getattr(store, "database_path", None)
+        if db_path is None:  # compatibility with store-like test doubles
+            db_path = store.db.execute("PRAGMA database_list").fetchone()[2]
         self.lock_path = db_path + ".lock" if db_path else str(self.root / ".documents.lock")
-        self._init_state()
+        self.read_only = read_only
+        if not read_only:
+            self._init_state()
 
     def _init_state(self):
         with self.store.write_lock:
@@ -121,20 +141,34 @@ class DocumentIndexer:
     def scan(self, max_files=250):
         if not 1 <= max_files <= 10000:
             raise ValueError("max_files must be between 1 and 10000")
-        self.store.set_index_metadata("last_index_started_at", datetime.now(UTC).isoformat())
-        self.store.set_index_metadata("last_index_error", "")
-        if not self.root.is_dir():
-            error = f"documents root does not exist: {self.root}"
-            self.store.set_index_metadata("last_index_error", error)
-            raise FileNotFoundError(error)
         with open(self.lock_path, "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            # Reject instead of queueing: a second request must not pile up
+            # behind a long scan (bounded wait, default none).
+            self._acquire_lock(lock)
+            self.store.set_index_metadata("last_index_started_at", datetime.now(UTC).isoformat())
+            self.store.set_index_metadata("last_index_error", "")
+            if not self.root.is_dir():
+                error = f"documents root does not exist: {self.root}"
+                self.store.set_index_metadata("last_index_error", error)
+                raise FileNotFoundError(error)
             result = self._scan(max_files)
         self.store.set_index_metadata("last_index_completed_at", datetime.now(UTC).isoformat())
         self.store.set_index_metadata(
             "last_index_error", "" if not result.errors else f"{result.errors} file errors"
         )
         return result
+
+    @staticmethod
+    def _acquire_lock(lock):
+        deadline = time.monotonic() + _lock_wait_seconds()
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise IndexBusyError("document index already running") from None
+                time.sleep(0.05)
 
     def _scan(self, max_files):
         stats = DocumentScanStats()
@@ -277,13 +311,26 @@ class DocumentIndexer:
         """
         if not 1 <= limit <= 1000:
             raise ValueError("limit must be between 1 and 1000")
-        rows = self.store.db.execute(
-            "SELECT path, error, last_attempt_at, last_success_at, status "
-            "FROM document_file_state WHERE status='error' "
-            "ORDER BY last_attempt_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        if self.read_only:
+            with self.store._read_connection() as db:
+                rows = self._error_rows(db, limit)
+        else:
+            rows = self._error_rows(self.store.db, limit)
         return [self._sanitize_error_row(row) for row in rows]
+
+    @staticmethod
+    def _error_rows(db, limit):
+        try:
+            return db.execute(
+                "SELECT path, error, last_attempt_at, last_success_at, status "
+                "FROM document_file_state WHERE status='error' "
+                "ORDER BY last_attempt_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return []  # state table is created lazily by the first index run
+            raise
 
     @staticmethod
     def _sanitize_error_row(row):
@@ -322,7 +369,11 @@ class DocumentIndexer:
         return re.sub(r"/[A-Za-z0-9_./ -]+", "<path>", text)
 
     def status(self):
-        result = self.store.status()
+        if self.read_only:
+            with self.store._read_connection() as db:
+                result = self.store.status(db)
+        else:
+            result = self.store.status()
         error_rows = self.errors()
         result["files_with_errors"] = len(error_rows)
         result["errors"] = error_rows
