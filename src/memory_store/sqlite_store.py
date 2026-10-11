@@ -175,6 +175,36 @@ class SQLiteStore:
             for r in rows
         ]
 
+    def search_exact(self, query, limit=32):
+        """Fetch a small FTS candidate set containing every significant query term.
+
+        This supplements the broad OR search so a distinctive model/name match
+        cannot be crowded out by common-term hits before ranking. FTS5 performs
+        indexed token lookups; result count is capped to keep work bounded.
+        """
+        terms = [term.strip('"') for term in query.split() if len(term.strip('"')) >= 3]
+        if not terms:
+            return []
+        match = " AND ".join('"' + term.replace('"', "") + '"' for term in terms)
+        limit = max(1, min(int(limit), 100))
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT c.*, bm25(chunks_fts) AS rank FROM chunks_fts f "
+                "JOIN chunks c ON c.id=f.id WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+                (match, limit),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "path": row["path"],
+                "heading": row["heading"],
+                "text": row["body"],
+                "line": row["line"],
+                "score": float(-row["rank"]),
+            }
+            for row in rows
+        ]
+
     def close(self):
         self.db.close()
 
@@ -182,18 +212,34 @@ class SQLiteStore:
         row = self.db.execute("SELECT vector FROM chunks WHERE id=?", (chunk_id,)).fetchone()
         return [float(x) for x in row[0].split(",")] if row else None
 
-    def status(self, db=None):
+    def status(self, db=None, include_fts_diagnostics=True, quick=False):
         """Return index counts; pass a ``_read_connection()`` handle to avoid the shared one."""
         db = db or self.db
         metadata = self.index_metadata(db)
-        chunk_count = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
-        fts_count = db.execute("SELECT count(*) FROM chunks_fts").fetchone()[0]
-        missing_fts = db.execute(
-            "SELECT count(*) FROM chunks c LEFT JOIN chunks_fts f ON f.id=c.id WHERE f.id IS NULL"
-        ).fetchone()[0]
-        orphaned_fts = db.execute(
-            "SELECT count(*) FROM chunks_fts f LEFT JOIN chunks c ON c.id=f.id WHERE c.id IS NULL"
-        ).fetchone()[0]
+        chunk_count = None if quick else db.execute("SELECT count(*) FROM chunks").fetchone()[0]
+        if include_fts_diagnostics and not quick:
+            fts_count = db.execute("SELECT count(*) FROM chunks_fts").fetchone()[0]
+            missing_fts = db.execute(
+                "SELECT count(*) FROM chunks c LEFT JOIN chunks_fts f ON f.id=c.id WHERE f.id IS NULL"
+            ).fetchone()[0]
+            orphaned_fts = db.execute(
+                "SELECT count(*) FROM chunks_fts f LEFT JOIN chunks c ON c.id=f.id WHERE c.id IS NULL"
+            ).fetchone()[0]
+            lexical_index = {
+                "chunks": fts_count,
+                "missing": missing_fts,
+                "orphaned": orphaned_fts,
+                "inSync": (fts_count == chunk_count and missing_fts == 0 and orphaned_fts == 0),
+            }
+        else:
+            # Avoid full-table FTS parity joins on every health/status poll.
+            lexical_index = {
+                "chunks": None,
+                "missing": None,
+                "orphaned": None,
+                "inSync": None,
+                "check": "not_run",
+            }
         age = None
         if metadata.get("last_index_completed_at"):
             try:
@@ -207,13 +253,10 @@ class SQLiteStore:
             except ValueError:
                 pass
         return {
+            # File count stays exact: it is a much smaller metadata table than
+            # chunks and useful for backward-compatible status reporting.
             "files": db.execute("SELECT count(*) FROM files").fetchone()[0],
             "chunks": chunk_count,
-            "lexicalIndex": {
-                "chunks": fts_count,
-                "missing": missing_fts,
-                "orphaned": orphaned_fts,
-                "inSync": (fts_count == chunk_count and missing_fts == 0 and orphaned_fts == 0),
-            },
+            "lexicalIndex": lexical_index,
             "index": {**metadata, "age_seconds": age},
         }

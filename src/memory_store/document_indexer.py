@@ -368,12 +368,12 @@ class DocumentIndexer:
 
         return re.sub(r"/[A-Za-z0-9_./ -]+", "<path>", text)
 
-    def status(self):
+    def status(self, quick=False):
         if self.read_only:
             with self.store._read_connection() as db:
-                result = self.store.status(db)
+                result = self.store.status(db, include_fts_diagnostics=not quick, quick=quick)
         else:
-            result = self.store.status()
+            result = self.store.status(include_fts_diagnostics=not quick, quick=quick)
         error_rows = self.errors()
         result["files_with_errors"] = len(error_rows)
         result["errors"] = error_rows

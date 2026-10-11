@@ -47,11 +47,76 @@ class ApiTests(unittest.TestCase):
             result = server.hybrid_search("fact", 1, server.store, None)[0]
             self.assertGreater(result["lexical_score"], 0)
             self.assertEqual(result["semantic_score"], 0)
-            self.assertEqual(result["score"], result["lexical_score"])
+            self.assertTrue(result["exact_match"])
+            self.assertEqual(result["score"], result["lexical_score"] + server.EXACT_MATCH_BOOST)
             self.assertEqual(result["lexical_evidence"], 2.0)
             self.assertEqual(result["relevance_score"], 1.0)
         finally:
             server.store.search = original
+
+    def test_exact_model_match_outranks_unrelated_semantic_result(self):
+        original_search = server.store.search
+
+        class Semantic:
+            def search(self, vector, limit):
+                return [
+                    {
+                        "id": "unrelated",
+                        "text": "ASUS router manual",
+                        "path": "router.md",
+                        "score": 0.8,
+                    }
+                ]
+
+        try:
+            server.store.search = lambda query, limit: [
+                {
+                    "id": "invoice",
+                    "text": "Denon AVR-X1700HDAB invoice",
+                    "path": "receipt.md",
+                    "score": 0.0,
+                }
+            ]
+            results = server.hybrid_search("Denon AVR-X1700HDAB", 2, server.store, Semantic())
+            self.assertEqual(results[0]["id"], "invoice")
+            self.assertTrue(results[0]["exact_match"])
+        finally:
+            server.store.search = original_search
+
+    def test_exact_candidate_retrieval_finds_target_outside_broad_top_n(self):
+        class CandidateStore:
+            def search(self, query, limit):
+                return [
+                    {
+                        "id": f"generic-{i}",
+                        "text": "Denon receiver overview",
+                        "path": f"{i}.md",
+                        "score": 1.0,
+                    }
+                    for i in range(limit)
+                ]
+
+            def search_exact(self, query, limit):
+                return [
+                    {
+                        "id": "invoice",
+                        "text": "Denon AVR-X1700HDAB invoice",
+                        "path": "invoice.md",
+                        "score": 0.0,
+                    }
+                ]
+
+        results = server.hybrid_search("Denon AVR-X1700HDAB", 1, CandidateStore(), None)
+        self.assertEqual(results[0]["id"], "invoice")
+        self.assertTrue(results[0]["exact_match"])
+
+    def test_exact_match_bonus_ignores_punctuation_only_query(self):
+        boost, matched = server.exact_match_bonus("---", {"text": "anything"})
+        self.assertEqual(boost, 0.0)
+        self.assertFalse(matched)
+
+    def test_vector_status_without_vector_store_returns_none(self):
+        self.assertIsNone(server.vector_status(server.store, None, bounded=True))
 
     def test_search_labels_output_registry_as_artifact(self):
         original = server.store.search

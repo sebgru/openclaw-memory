@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 import unittest
 from pathlib import Path
@@ -9,6 +10,30 @@ from memory_store.qdrant import QdrantStore
 
 
 class QdrantTests(unittest.TestCase):
+    def test_bounded_diagnostics_checks_only_a_sample_and_uses_approximate_count(self):
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE chunks (id TEXT)")
+        db.executemany("INSERT INTO chunks VALUES (?)", [(str(i),) for i in range(1000)])
+
+        class Store:
+            def _read_connection(self):
+                from contextlib import nullcontext
+
+                return nullcontext(db)
+
+        q = QdrantStore("http://qdrant:6333")
+        count_requests = []
+        q._request = lambda method, path, payload=None: (
+            count_requests.append(payload) or {"result": {"count": 1000}}
+        )
+        q.point_ids = lambda ids: set()
+        result = q.bounded_diagnostics(Store(), sample_size=8)
+        self.assertIsNone(result["chunks"])
+        self.assertEqual(result["sample"]["size"], 8)
+        self.assertEqual(result["sample"]["missing_vectors"], 8)
+        self.assertIsNone(result["missing_vectors"])
+        self.assertEqual(count_requests, [{"exact": False}])
+
     def test_upsert_and_search_payload(self):
         calls = []
 

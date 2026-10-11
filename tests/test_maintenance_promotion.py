@@ -2,17 +2,38 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from memory_store.chunker import chunk_markdown
 from memory_store.indexer import Indexer
-from memory_store.maintenance import backup_database, verify_database
+from memory_store.maintenance import backup_database, database_availability, verify_database
 from memory_store.promotion import PromotionError, audit_record, candidates, promote
 from memory_store.sqlite_store import SQLiteStore
 
 
 class MaintenanceTests(unittest.TestCase):
+    def test_database_availability_closes_connection(self):
+        class FakeConnection:
+            closed = False
+
+            def execute(self, query):
+                self.query = query
+                return self
+
+            def fetchone(self):
+                return ("sqlite_schema",)
+
+            def close(self):
+                self.closed = True
+
+        connection = FakeConnection()
+        with patch("memory_store.maintenance.sqlite3.connect", return_value=connection):
+            result = database_availability("available.db")
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(connection.closed)
+
     def test_archive_index_is_incremental_and_removes_deleted_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
