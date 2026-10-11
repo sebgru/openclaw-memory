@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from memory_store import server
+from memory_store import document_indexer, server
 from memory_store.document_indexer import DocumentIndexer, IndexBusyError
 from memory_store.sqlite_store import SQLiteStore
 
@@ -117,6 +117,23 @@ class DocumentsEndpointSafetyTests(unittest.TestCase):
                 elapsed = time.monotonic() - started
             self.assertGreaterEqual(elapsed, 0.25)
             self.assertLess(elapsed, 2.0)
+
+    def test_lock_wait_seconds_defaults_to_zero_on_invalid_env(self):
+        with patch.dict("os.environ", {"DOCUMENTS_INDEX_LOCK_TIMEOUT_SECONDS": "not-a-number"}):
+            self.assertEqual(document_indexer._lock_wait_seconds(), 0.0)
+
+    def test_indexer_resolves_lock_path_without_cached_database_path(self):
+        # Store-like doubles predating SQLiteStore.database_path must still get
+        # a lock path derived from the connection's database file.
+        class StoreDouble:
+            def __init__(self, db):
+                self.db = db
+
+        db_path = Path(self.tmp.name) / "double.db"
+        db = sqlite3.connect(str(db_path))
+        self.addCleanup(db.close)
+        indexer = DocumentIndexer(self.docs, StoreDouble(db), read_only=True)
+        self.assertEqual(indexer.lock_path, str(db_path) + ".lock")
 
 
 if __name__ == "__main__":

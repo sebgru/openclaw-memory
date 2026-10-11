@@ -262,6 +262,13 @@ class DocumentIndexerTests(unittest.TestCase):
         )
         self.assertLessEqual(len(sanitized["error_message"]), 1000)
 
+    def test_errors_sanitizes_missing_error_message(self):
+        sanitized = DocumentIndexer._sanitize_error_row(
+            ("file.md", None, "2026-01-01T00:00:00", None, "error")
+        )
+        self.assertEqual(sanitized["error_class"], "UnknownError")
+        self.assertEqual(sanitized["error_message"], "")
+
     def test_errors_limit_validation(self):
         with self.assertRaises(ValueError):
             self.indexer.errors(limit=0)

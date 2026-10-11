@@ -335,6 +335,15 @@ class SQLiteTransactionTests(unittest.TestCase):
         self.store.upsert_file_precomputed("empty.md", "d", [])
         self.assertFalse(self.store.db.in_transaction)
 
+    def test_delete_file_without_commit_defers_commit_to_caller(self):
+        """``commit=False`` lets a caller own the surrounding transaction."""
+        self.store.upsert_file_precomputed("doc.md", "d1", [("c1", "h", "b", 1, [0.1] * 4)])
+        self.store.delete_file("doc.md", commit=False)
+        self.assertTrue(self.store.db.in_transaction)
+        self.assertEqual(self.store.chunk_ids("doc.md"), [])
+        self.store.db.commit()
+        self.assertFalse(self.store.db.in_transaction)
+
     def test_rapid_upsert_delete_cycle(self):
         """Stress: rapid upsert+delete cycles should not produce transaction errors."""
         for i in range(50):
