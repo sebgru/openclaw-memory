@@ -28,6 +28,11 @@ class SQLiteStore:
         self.read_timeout = _default_read_timeout() if read_timeout is None else read_timeout
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        # Cache the database filename while the store is being initialized.
+        # Read-only document handlers must not query the shared connection just
+        # to discover the lock-file path: that connection may be occupied by
+        # a long-running index transaction.
+        self.database_path = self.db.execute("PRAGMA database_list").fetchone()[2]
         self.dimensions = dimensions
         # Re-entrant lock guarding every write on this shared connection.
         # A multi-statement transaction (``upsert_file_precomputed``) must not

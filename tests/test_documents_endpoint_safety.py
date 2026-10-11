@@ -83,6 +83,13 @@ class DocumentsEndpointSafetyTests(unittest.TestCase):
         indexer.errors()
         self.assertEqual(self.store.db.total_changes, before)
 
+    def test_read_only_indexer_does_not_query_shared_connection_on_init(self):
+        # A stuck index operation can occupy the shared connection. Read-only
+        # endpoint setup must use the filename cached when SQLiteStore opened.
+        self.store.db.close()
+        indexer = DocumentIndexer(self.docs, self.store, read_only=True)
+        self.assertEqual(indexer.errors(), [])
+
     def test_index_rejects_when_scan_lock_held(self):
         indexer = DocumentIndexer(self.docs, self.store)
         with open(indexer.lock_path, "w") as held:

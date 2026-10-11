@@ -60,7 +60,9 @@ class DocumentIndexer:
         self.chunk_size = chunk_size
         self.include_patterns = tuple(include_patterns)
         self.exclude_patterns = tuple(exclude_patterns)
-        db_path = store.db.execute("PRAGMA database_list").fetchone()[2]
+        db_path = getattr(store, "database_path", None)
+        if db_path is None:  # compatibility with store-like test doubles
+            db_path = store.db.execute("PRAGMA database_list").fetchone()[2]
         self.lock_path = db_path + ".lock" if db_path else str(self.root / ".documents.lock")
         self.read_only = read_only
         if not read_only:
