@@ -110,6 +110,14 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(results[0]["id"], "invoice")
         self.assertTrue(results[0]["exact_match"])
 
+    def test_exact_match_bonus_ignores_punctuation_only_query(self):
+        boost, matched = server.exact_match_bonus("---", {"text": "anything"})
+        self.assertEqual(boost, 0.0)
+        self.assertFalse(matched)
+
+    def test_vector_status_without_vector_store_returns_none(self):
+        self.assertIsNone(server.vector_status(server.store, None, bounded=True))
+
     def test_search_labels_output_registry_as_artifact(self):
         original = server.store.search
         try:
