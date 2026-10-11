@@ -13,7 +13,7 @@ from .embeddings import EmbeddingClient
 from .indexer import Indexer
 from .maintenance import verify_database
 from .promotion import PromotionError, candidates, promote
-from .qdrant import QdrantStore
+from .qdrant import QdrantStore, point_id
 from .sqlite_store import SQLiteStore
 
 logger = logging.getLogger("memory_store")
@@ -132,10 +132,12 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         semantic = []
     merged: dict = {}
     max_lexical_evidence = max((max(0.0, row.get("score", 0.0)) for row in lexical), default=0)
+    # SQLite rows carry raw chunk IDs while Qdrant hits carry UUID5 point IDs;
+    # key lexical rows by their point ID so both backends fuse on one identity.
     for rank, row in enumerate(lexical):
         score = 1 / (60 + rank + 1)
         item = merged.setdefault(
-            row["id"],
+            point_id(row["id"]),
             {
                 **row,
                 "score": 0,

@@ -5,6 +5,11 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
+def point_id(chunk_id):
+    """Return the Qdrant point ID derived from a SQLite chunk ID."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, chunk_id))
+
+
 class QdrantStore:
     """Minimal Qdrant REST adapter; no SDK or credentials are required."""
 
@@ -53,7 +58,7 @@ class QdrantStore:
         self.ensure_collection()
         points = [
             {
-                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, cid)),
+                "id": point_id(cid),
                 "vector": embed(f"{heading} {body}"),
                 "payload": {"path": path, "heading": heading, "text": body, "line": line},
             }
@@ -68,7 +73,7 @@ class QdrantStore:
         self.ensure_collection()
         points = [
             {
-                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, cid)),
+                "id": point_id(cid),
                 "vector": vector,
                 "payload": {"path": path, "heading": heading, "text": body, "line": line},
             }
@@ -89,7 +94,7 @@ class QdrantStore:
         self._request(
             "POST",
             "/collections/" + quote(self.collection, safe="") + "/points/delete",
-            {"points": [str(uuid.uuid5(uuid.NAMESPACE_URL, item)) for item in ids]},
+            {"points": [point_id(item) for item in ids]},
         )
 
     def delete_file(self, path):
@@ -125,7 +130,7 @@ class QdrantStore:
             "POST",
             "/collections/" + quote(self.collection, safe="") + "/points",
             {
-                "ids": [str(uuid.uuid5(uuid.NAMESPACE_URL, cid)) for cid in ids],
+                "ids": [point_id(cid) for cid in ids],
                 "with_payload": False,
                 "with_vector": False,
             },
@@ -135,7 +140,7 @@ class QdrantStore:
     def diagnostics(self, store):
         chunks = [row[0] for row in store.db.execute("SELECT id FROM chunks")]
         present = self.point_ids(chunks)
-        expected = {str(uuid.uuid5(uuid.NAMESPACE_URL, cid)) for cid in chunks}
+        expected = {point_id(cid) for cid in chunks}
         return {
             "points": self.point_count(),
             "chunks": len(chunks),
@@ -146,7 +151,7 @@ class QdrantStore:
         rows = store.db.execute("SELECT id, path, heading, body, line FROM chunks").fetchall()
         present = self.point_ids([row[0] for row in rows])
         missing = [
-            row for row in rows if str(uuid.uuid5(uuid.NAMESPACE_URL, row[0])) not in present
+            row for row in rows if point_id(row[0]) not in present
         ]
         selected = missing[:limit]
         self.upsert([(r[0], r[1], r[2], r[3], r[4]) for r in selected], embed)

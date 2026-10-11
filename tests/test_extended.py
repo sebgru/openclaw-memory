@@ -17,7 +17,7 @@ from memory_store import server
 from memory_store.chunker import chunk_markdown
 from memory_store.embeddings import EmbeddingClient, hash_embedding
 from memory_store.indexer import Indexer
-from memory_store.qdrant import QdrantStore
+from memory_store.qdrant import QdrantStore, point_id
 from memory_store.sqlite_store import SQLiteStore
 
 # ── hash_embedding ───────────────────────────────────────────────────────────
@@ -405,8 +405,22 @@ class ApiExtendedTests(unittest.TestCase):
             {"id": "a", "path": "a.md", "heading": "h", "text": "t", "line": 1, "score": -1.0}
         ]
         semantic = [
-            {"id": "a", "path": "a.md", "heading": "h", "text": "t", "line": 1, "score": 0.9},
-            {"id": "b", "path": "b.md", "heading": "h", "text": "t", "line": 1, "score": 0.8},
+            {
+                "id": point_id("a"),
+                "path": "a.md",
+                "heading": "h",
+                "text": "t",
+                "line": 1,
+                "score": 0.9,
+            },
+            {
+                "id": point_id("b"),
+                "path": "b.md",
+                "heading": "h",
+                "text": "t",
+                "line": 1,
+                "score": 0.8,
+            },
         ]
         with (
             patch.object(server.store, "search", return_value=lexical),
@@ -421,10 +435,38 @@ class ApiExtendedTests(unittest.TestCase):
         self.assertEqual(len(results), 2)
         ids = [r["id"] for r in results]
         self.assertIn("a", ids)
-        self.assertIn("b", ids)
-        self.assertEqual(results[0]["id"], "b")
+        self.assertIn(point_id("b"), ids)
+        self.assertEqual(results[0]["id"], point_id("b"))
         a_row = next(r for r in results if r["id"] == "a")
         self.assertAlmostEqual(a_row["score"], 2 / 61, places=4)
+
+    def test_hybrid_search_dedupes_same_chunk_with_backend_specific_ids(self):
+        row = {"path": "a.md", "heading": "h", "text": "t", "line": 1}
+        lexical = [{**row, "id": "chunk-a", "score": 2.0}]
+        semantic = [
+            {**row, "id": point_id("chunk-a"), "score": 0.9},
+            {
+                "id": point_id("chunk-b"),
+                "path": "b.md",
+                "heading": "h",
+                "text": "other",
+                "line": 1,
+                "score": 0.5,
+            },
+        ]
+        with (
+            patch.object(server.store, "search", return_value=lexical),
+            patch.object(server.embedder, "embed", return_value=[0.0] * 128),
+            patch.object(server, "vector_store") as mock_vector,
+        ):
+            mock_vector.search.return_value = semantic
+            results = server.hybrid_search("t", 10)
+        self.assertEqual(sorted(r["path"] for r in results), ["a.md", "b.md"])
+        a_row = next(r for r in results if r["path"] == "a.md")
+        self.assertEqual(a_row["id"], "chunk-a")
+        self.assertAlmostEqual(a_row["score"], 2 / 61, places=4)
+        self.assertGreater(a_row["lexical_score"], 0)
+        self.assertGreater(a_row["semantic_score"], 0)
 
     def test_sqlite_store_vector_roundtrip_and_close(self):
         store = SQLiteStore(":memory:", dimensions=8)
