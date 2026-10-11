@@ -1,5 +1,5 @@
-import sys
 import sqlite3
+import sys
 import unittest
 from pathlib import Path
 
