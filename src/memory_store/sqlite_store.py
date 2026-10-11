@@ -67,7 +67,8 @@ class SQLiteStore:
 
     def index_metadata(self, db=None):
         return {
-            row[0]: row[1] for row in (db or self.db).execute("SELECT key, value FROM index_metadata")
+            row[0]: row[1]
+            for row in (db or self.db).execute("SELECT key, value FROM index_metadata")
         }
 
     def upsert_file(self, path, digest, chunks, embed=None):
