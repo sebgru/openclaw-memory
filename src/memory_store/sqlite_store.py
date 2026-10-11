@@ -1,14 +1,32 @@
+import os
 import sqlite3
 import threading
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .embeddings import hash_embedding
 
 
+def _default_read_timeout() -> float:
+    try:
+        return max(0.0, float(os.getenv("SQLITE_READ_TIMEOUT_SECONDS", "2")))
+    except ValueError:
+        return 2.0
+
+
 class SQLiteStore:
-    def __init__(self, path: str | Path = ":memory:", dimensions: int = 128):
-        self.db = sqlite3.connect(str(path), check_same_thread=False)
+    def __init__(
+        self,
+        path: str | Path = ":memory:",
+        dimensions: int = 128,
+        read_timeout: float | None = None,
+    ):
+        self.path = str(path)
+        # Upper bound on how long a search waits for a file lock held by a
+        # long-running writer before failing fast with ``OperationalError``.
+        self.read_timeout = _default_read_timeout() if read_timeout is None else read_timeout
+        self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.dimensions = dimensions
         # Re-entrant lock guarding every write on this shared connection.
@@ -109,14 +127,34 @@ class SQLiteStore:
             if commit:
                 self.db.commit()
 
+    @contextmanager
+    def _read_connection(self):
+        """Yield a connection for read-only queries.
+
+        File-backed stores get a short-lived read-only connection with a
+        bounded busy timeout, so a search neither queues behind the shared
+        connection's mutex while a long index transaction runs nor waits
+        indefinitely for a file lock.  ``:memory:`` databases exist only on
+        the shared connection, which is reused unchanged.  Writes keep going
+        through the single shared connection and ``write_lock``.
+        """
+        if self.path == ":memory:" or self.path.startswith("file:"):
+            yield self.db
+            return
+        uri = Path(self.path).resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=self.read_timeout)) as db:
+            db.row_factory = sqlite3.Row
+            yield db
+
     def search(self, query, limit=10):
         if not query.strip():
             return []
         safe = " OR ".join('"' + x.replace('"', "") + '"' for x in query.split() if x)
-        rows = self.db.execute(
-            "SELECT c.*, bm25(chunks_fts) AS rank FROM chunks_fts f JOIN chunks c ON c.id=f.id WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
-            (safe, limit),
-        ).fetchall()
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT c.*, bm25(chunks_fts) AS rank FROM chunks_fts f JOIN chunks c ON c.id=f.id WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+                (safe, limit),
+            ).fetchall()
         return [
             {
                 "id": r["id"],
