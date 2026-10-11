@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import sys
 import tempfile
@@ -21,6 +22,19 @@ class ReadIsolationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / "docs.db"
+
+    def test_read_timeout_env_is_honored_and_clamped(self):
+        with patch.dict(os.environ, {"SQLITE_READ_TIMEOUT_SECONDS": "0.5"}):
+            store = SQLiteStore(":memory:")
+        self.assertEqual(store.read_timeout, 0.5)
+        with patch.dict(os.environ, {"SQLITE_READ_TIMEOUT_SECONDS": "-3"}):
+            self.assertEqual(SQLiteStore(":memory:").read_timeout, 0.0)
+        self.assertEqual(SQLiteStore(":memory:", read_timeout=3.0).read_timeout, 3.0)
+
+    def test_invalid_read_timeout_env_falls_back_to_default(self):
+        with patch.dict(os.environ, {"SQLITE_READ_TIMEOUT_SECONDS": "not-a-number"}):
+            store = SQLiteStore(":memory:")
+        self.assertEqual(store.read_timeout, 2.0)
 
     def test_memory_store_keeps_shared_connection(self):
         store = SQLiteStore(":memory:")
