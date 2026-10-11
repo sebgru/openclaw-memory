@@ -48,6 +48,19 @@ class CoreTests(unittest.TestCase):
             Indexer(self.root / "missing", self.store).scan()
         self.assertIn("does not exist", self.store.status()["index"]["last_index_error"])
 
+    def test_status_reports_lexical_index_drift(self):
+        self.store.upsert_file(
+            "known.md", "digest", [("known-id", "Known phrase", "needle phrase", 1)]
+        )
+        self.assertEqual(self.store.search("needle phrase")[0]["path"], "known.md")
+        lexical = self.store.status()["lexicalIndex"]
+        self.assertEqual(lexical, {"chunks": 1, "missing": 0, "orphaned": 0, "inSync": True})
+
+        # Simulate a stale FTS table without touching any on-disk or production data.
+        self.store.db.execute("DELETE FROM chunks_fts WHERE id=?", ("known-id",))
+        lexical = self.store.status()["lexicalIndex"]
+        self.assertEqual(lexical, {"chunks": 0, "missing": 1, "orphaned": 0, "inSync": False})
+
     def test_missing_root(self):
         with self.assertRaises(FileNotFoundError):
             Indexer(self.root / "missing", self.store).scan()
