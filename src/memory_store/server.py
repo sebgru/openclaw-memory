@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 from .document_indexer import DocumentIndexer, IndexBusyError
 from .embeddings import EmbeddingClient
 from .indexer import Indexer
-from .maintenance import verify_database
+from .maintenance import database_availability, verify_database
 from .promotion import PromotionError, candidates, promote
 from .qdrant import QdrantStore, point_id
 from .sqlite_store import SQLiteStore
@@ -100,6 +100,9 @@ def env_int(name, default):
 
 
 PROMPT_MIN_RELEVANCE = env_float("PROMPT_MIN_RELEVANCE", 0.2)
+EXACT_MATCH_BOOST = env_float("EXACT_MATCH_BOOST", 1.0)
+TERM_COVERAGE_WEIGHT = env_float("TERM_COVERAGE_WEIGHT", 0.3)
+MIN_TERM_LENGTH = 3
 PROMPT_SOURCE_QUOTAS = {
     "memory": env_int("PROMPT_MEMORY_QUOTA", 3),
     "artifact": env_int("PROMPT_ARTIFACT_QUOTA", 1),
@@ -179,6 +182,9 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         )
         semantic_relevance = max(0.0, min(1.0, item["semantic_similarity"]))
         item["relevance_score"] = max(lexical_relevance, semantic_relevance)
+        bonus, exact = exact_match_bonus(query, item)
+        item["exact_match"] = exact
+        item["score"] += bonus
     return [
         annotate_result(item)
         for item in sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
@@ -196,8 +202,12 @@ def indexer(root, selected_store, selected_vector_store, includes=("**/*.md",), 
     )
 
 
-def vector_status(selected_store, selected_vector_store):
-    return selected_vector_store.diagnostics(selected_store) if selected_vector_store else None
+def vector_status(selected_store, selected_vector_store, bounded=False):
+    if not selected_vector_store:
+        return None
+    if bounded and hasattr(selected_vector_store, "bounded_diagnostics"):
+        return selected_vector_store.bounded_diagnostics(selected_store)
+    return selected_vector_store.diagnostics(selected_store)
 
 
 def annotate_result(result):
@@ -205,6 +215,29 @@ def annotate_result(result):
     path = str(result.get("path", ""))
     source = "artifact" if path == "outputs/INDEX.md" or path.startswith("outputs/") else "memory"
     return {**result, "source": source}
+
+
+def _relaxed_text(value):
+    """Normalize punctuation/spacing for identifying verbatim query matches."""
+    return " ".join(
+        "".join(char if char.isalnum() else " " for char in str(value or "").casefold()).split()
+    )
+
+
+def exact_match_bonus(query, item):
+    """Promote exact entity/model matches above semantically similar results."""
+    needle = _relaxed_text(query)
+    if not needle:
+        return 0.0, False
+    haystack = _relaxed_text(f"{item.get('heading', '')} {item.get('text', '')}")
+    path_text = _relaxed_text(item.get("path", ""))
+    if len(needle) >= MIN_TERM_LENGTH and (needle in haystack or needle in path_text):
+        return EXACT_MATCH_BOOST, True
+    terms = [term for term in needle.split() if len(term) >= MIN_TERM_LENGTH]
+    if not terms:
+        return 0.0, False
+    matched = sum(1 for term in terms if term in haystack or term in path_text)
+    return TERM_COVERAGE_WEIGHT * matched / len(terms), False
 
 
 def unified_source(result, archive=False, document=False):
@@ -399,7 +432,9 @@ class Handler(BaseHTTPRequestHandler):
             if not documents_store:
                 return self.send_json(404, {"error": "documents are not configured"})
             try:
-                integrity = verify_database(documents_store.path, documents_store.read_timeout)
+                integrity = database_availability(
+                    documents_store.path, documents_store.read_timeout
+                )
                 document_status = DocumentIndexer(
                     DOCUMENTS_ROOT,
                     documents_store,
@@ -408,14 +443,16 @@ class Handler(BaseHTTPRequestHandler):
                     include_patterns=DOCUMENTS_INCLUDE_PATTERNS,
                     exclude_patterns=DOCUMENTS_EXCLUDE_PATTERNS,
                     read_only=True,
-                ).status()
+                ).status(quick=True)
             except sqlite3.OperationalError as exc:
                 logger.warning("%s unavailable: %s", parsed.path, exc)
                 return self.send_json(503, {"error": "documents database busy", "detail": str(exc)})
             status = {"status": integrity["status"], "database": integrity, **document_status}
             if documents_vector_store:
                 try:
-                    status["vectors"] = vector_status(documents_store, documents_vector_store)
+                    status["vectors"] = vector_status(
+                        documents_store, documents_vector_store, bounded=True
+                    )
                 except Exception as exc:
                     status["vectors"] = {"status": "error", "error": str(exc)}
             return self.send_json(200, status)
@@ -447,17 +484,23 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/archive/status":
             if not archive_store:
                 return self.send_json(404, {"error": "archive is not configured"})
-            integrity = verify_database(
-                archive_store.db.execute("PRAGMA database_list").fetchone()[2]
+            integrity = database_availability(
+                archive_store.database_path, archive_store.read_timeout
             )
+            with archive_store._read_connection() as db:
+                archive_status = archive_store.status(
+                    db, include_fts_diagnostics=False, quick=True
+                )
             status = {
                 "status": integrity["status"],
                 "database": integrity,
-                **archive_store.status(),
+                **archive_status,
             }
             if archive_vector_store:
                 try:
-                    status["vectors"] = vector_status(archive_store, archive_vector_store)
+                    status["vectors"] = vector_status(
+                        archive_store, archive_vector_store, bounded=True
+                    )
                 except Exception as exc:
                     status["vectors"] = {"status": "error", "error": str(exc)}
             return self.send_json(200, status)

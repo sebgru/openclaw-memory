@@ -60,6 +60,47 @@ class DocumentsEndpointSafetyTests(unittest.TestCase):
 
     def test_status_and_errors_do_not_create_state_table(self):
         self.assertNotIn("document_file_state", self.tables())
+
+    def test_documents_status_skips_full_integrity_and_uses_bounded_vector_diagnostics(self):
+        class Vectors:
+            def diagnostics(self, store):
+                raise AssertionError("unbounded diagnostic must not be called")
+
+            def bounded_diagnostics(self, store):
+                return {"parity": "sampled", "sample": {"size": 1}}
+
+        with patch.object(server, "documents_vector_store", Vectors()), patch.object(
+            server, "verify_database", side_effect=AssertionError("full integrity scan")
+        ):
+            status, body = self.request("GET", "/documents/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["database"]["integrity"], "not_checked")
+        self.assertEqual(body["database"]["check"], "not_run")
+        self.assertEqual(body["files"], 0)
+        self.assertIsNone(body["chunks"])
+        self.assertIsNone(body["lexicalIndex"]["inSync"])
+        self.assertEqual(body["vectors"]["parity"], "sampled")
+
+    def test_archive_status_skips_full_integrity_and_uses_bounded_vector_diagnostics(self):
+        archive = SQLiteStore(Path(self.tmp.name) / "archive.db", read_timeout=0.2)
+        self.addCleanup(archive.close)
+
+        class Vectors:
+            def diagnostics(self, store):
+                raise AssertionError("unbounded diagnostic must not be called")
+
+            def bounded_diagnostics(self, store):
+                return {"parity": "sampled", "sample": {"size": 1}}
+
+        with patch.object(server, "archive_store", archive), patch.object(
+            server, "archive_vector_store", Vectors()
+        ), patch.object(server, "verify_database", side_effect=AssertionError("full integrity scan")):
+            status, body = self.request("GET", "/archive/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["database"]["integrity"], "not_checked")
+        self.assertEqual(body["database"]["check"], "not_run")
+        self.assertIsNone(body["lexicalIndex"]["inSync"])
+        self.assertEqual(body["vectors"]["parity"], "sampled")
         self.assertEqual(self.request("GET", "/documents/errors")[1], {"errors": []})
         status, body = self.request("GET", "/documents/status")
         self.assertEqual(status, 200)

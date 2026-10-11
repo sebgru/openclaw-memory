@@ -16,6 +16,26 @@ def verify_database(path: str | Path, timeout: float = 5.0) -> dict[str, str]:
     return {"status": "ok" if result == "ok" else "error", "integrity": result}
 
 
+def database_availability(path: str | Path, timeout: float = 2.0) -> dict[str, str]:
+    """Check that a database can be opened without scanning every page.
+
+    Routine status polling must not run ``integrity_check`` on multi-gigabyte
+    stores. Full integrity verification remains available via ``verify``.
+    """
+    try:
+        uri = Path(path).resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=timeout) as db:
+            db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+    except sqlite3.DatabaseError as exc:
+        return {"status": "error", "integrity": "not_checked", "error": str(exc)}
+    return {
+        "status": "ok",
+        "integrity": "not_checked",
+        "check": "not_run",
+        "note": "Full integrity verification is available via the verify command.",
+    }
+
+
 def backup_database(source: str | Path, destination: str | Path, verify_restore=True) -> dict:
     """Create a consistent SQLite backup and optionally verify a restore copy."""
     source, destination = Path(source), Path(destination)

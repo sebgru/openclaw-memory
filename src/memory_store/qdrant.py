@@ -116,10 +116,13 @@ class QdrantStore:
         ]
 
     def point_count(self):
+        return self.count_points(exact=True)
+
+    def count_points(self, exact):
         result = self._request(
             "POST",
             "/collections/" + quote(self.collection, safe="") + "/points/count",
-            {"exact": True},
+            {"exact": exact},
         )
         return int(result.get("result", {}).get("count", 0))
 
@@ -145,6 +148,29 @@ class QdrantStore:
             "points": self.point_count(),
             "chunks": len(chunks),
             "missing_vectors": len(expected - present),
+        }
+
+    def bounded_diagnostics(self, store, sample_size=128):
+        """Return routine status without materializing the entire chunk corpus."""
+        with store._read_connection() as db:
+            sample = [
+                row[0]
+                for row in db.execute(
+                    "SELECT id FROM chunks ORDER BY id LIMIT ?", (sample_size,)
+                )
+            ]
+        present = self.point_ids(sample)
+        expected = {point_id(chunk_id) for chunk_id in sample}
+        return {
+            "points": self.count_points(exact=False),
+            "chunks": None,
+            "missing_vectors": None,
+            "sample": {
+                "size": len(sample),
+                "missing_vectors": len(expected - present),
+                "complete_parity": False,
+            },
+            "parity": "sampled",
         }
 
     def reconcile_missing(self, store, embed, limit=1000):

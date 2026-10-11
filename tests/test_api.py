@@ -47,11 +47,33 @@ class ApiTests(unittest.TestCase):
             result = server.hybrid_search("fact", 1, server.store, None)[0]
             self.assertGreater(result["lexical_score"], 0)
             self.assertEqual(result["semantic_score"], 0)
-            self.assertEqual(result["score"], result["lexical_score"])
+            self.assertTrue(result["exact_match"])
+            self.assertEqual(result["score"], result["lexical_score"] + server.EXACT_MATCH_BOOST)
             self.assertEqual(result["lexical_evidence"], 2.0)
             self.assertEqual(result["relevance_score"], 1.0)
         finally:
             server.store.search = original
+
+    def test_exact_model_match_outranks_unrelated_semantic_result(self):
+        original_search = server.store.search
+
+        class Semantic:
+            def search(self, vector, limit):
+                return [{"id": "unrelated", "text": "ASUS router manual", "path": "router.md",
+                         "score": 0.8}]
+
+        try:
+            server.store.search = lambda query, limit: [
+                {"id": "invoice", "text": "Denon AVR-X1700HDAB invoice", "path": "receipt.md",
+                 "score": 0.0}
+            ]
+            results = server.hybrid_search(
+                "Denon AVR-X1700HDAB", 2, server.store, Semantic()
+            )
+            self.assertEqual(results[0]["id"], "invoice")
+            self.assertTrue(results[0]["exact_match"])
+        finally:
+            server.store.search = original_search
 
     def test_search_labels_output_registry_as_artifact(self):
         original = server.store.search
