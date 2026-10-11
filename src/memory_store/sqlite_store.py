@@ -138,6 +138,14 @@ class SQLiteStore:
 
     def status(self):
         metadata = self.index_metadata()
+        chunk_count = self.db.execute("SELECT count(*) FROM chunks").fetchone()[0]
+        fts_count = self.db.execute("SELECT count(*) FROM chunks_fts").fetchone()[0]
+        missing_fts = self.db.execute(
+            "SELECT count(*) FROM chunks c LEFT JOIN chunks_fts f ON f.id=c.id WHERE f.id IS NULL"
+        ).fetchone()[0]
+        orphaned_fts = self.db.execute(
+            "SELECT count(*) FROM chunks_fts f LEFT JOIN chunks c ON c.id=f.id WHERE c.id IS NULL"
+        ).fetchone()[0]
         age = None
         if metadata.get("last_index_completed_at"):
             try:
@@ -152,6 +160,14 @@ class SQLiteStore:
                 pass
         return {
             "files": self.db.execute("SELECT count(*) FROM files").fetchone()[0],
-            "chunks": self.db.execute("SELECT count(*) FROM chunks").fetchone()[0],
+            "chunks": chunk_count,
+            "lexicalIndex": {
+                "chunks": fts_count,
+                "missing": missing_fts,
+                "orphaned": orphaned_fts,
+                "inSync": (
+                    fts_count == chunk_count and missing_fts == 0 and orphaned_fts == 0
+                ),
+            },
             "index": {**metadata, "age_seconds": age},
         }
