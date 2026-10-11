@@ -175,6 +175,36 @@ class SQLiteStore:
             for r in rows
         ]
 
+    def search_exact(self, query, limit=32):
+        """Fetch a small FTS candidate set containing every significant query term.
+
+        This supplements the broad OR search so a distinctive model/name match
+        cannot be crowded out by common-term hits before ranking. FTS5 performs
+        indexed token lookups; result count is capped to keep work bounded.
+        """
+        terms = [term.strip('"') for term in query.split() if len(term.strip('"')) >= 3]
+        if not terms:
+            return []
+        match = " AND ".join('"' + term.replace('"', '') + '"' for term in terms)
+        limit = max(1, min(int(limit), 100))
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT c.*, bm25(chunks_fts) AS rank FROM chunks_fts f "
+                "JOIN chunks c ON c.id=f.id WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+                (match, limit),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "path": row["path"],
+                "heading": row["heading"],
+                "text": row["body"],
+                "line": row["line"],
+                "score": float(-row["rank"]),
+            }
+            for row in rows
+        ]
+
     def close(self):
         self.db.close()
 

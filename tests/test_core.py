@@ -36,6 +36,16 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(Indexer(self.root, self.store).scan().removed, 1)
         self.assertFalse(self.store.search("hello"))
 
+    def test_search_exact_uses_bounded_fts_term_intersection(self):
+        self.store.upsert_file(
+            "invoice.md", "digest", [("target", "Receipt", "Denon AVR-X1700HDAB invoice", 1)]
+        )
+        self.store.upsert_file(
+            "overview.md", "other", [("generic", "Overview", "Denon receiver overview", 1)]
+        )
+        results = self.store.search_exact("Denon AVR-X1700HDAB", limit=500)
+        self.assertEqual([row["id"] for row in results], ["target"])
+
     def test_index_status_records_freshness_and_errors(self):
         file = self.root / "a.md"
         file.write_text("# Topic\nhello world")

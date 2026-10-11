@@ -75,6 +75,23 @@ class ApiTests(unittest.TestCase):
         finally:
             server.store.search = original_search
 
+    def test_exact_candidate_retrieval_finds_target_outside_broad_top_n(self):
+        class CandidateStore:
+            def search(self, query, limit):
+                return [
+                    {"id": f"generic-{i}", "text": "Denon receiver overview", "path": f"{i}.md",
+                     "score": 1.0}
+                    for i in range(limit)
+                ]
+
+            def search_exact(self, query, limit):
+                return [{"id": "invoice", "text": "Denon AVR-X1700HDAB invoice",
+                         "path": "invoice.md", "score": 0.0}]
+
+        results = server.hybrid_search("Denon AVR-X1700HDAB", 1, CandidateStore(), None)
+        self.assertEqual(results[0]["id"], "invoice")
+        self.assertTrue(results[0]["exact_match"])
+
     def test_search_labels_output_registry_as_artifact(self):
         original = server.store.search
         try:

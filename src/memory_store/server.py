@@ -124,6 +124,12 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         vector_store if selected_vector_store is _DEFAULT_VECTOR else selected_vector_store
     )
     lexical = selected_store.search(query, limit * 3)
+    if hasattr(selected_store, "search_exact"):
+        exact_candidates = selected_store.search_exact(query, min(limit * 2, 100))
+        by_id = {row["id"]: row for row in lexical}
+        for row in exact_candidates:
+            by_id.setdefault(row["id"], row)
+        lexical = list(by_id.values())
     try:
         semantic = (
             selected_vector_store.search(embedder.embed(query), limit * 3)

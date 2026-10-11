@@ -3,6 +3,7 @@
 import argparse
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 
@@ -24,7 +25,7 @@ def database_availability(path: str | Path, timeout: float = 2.0) -> dict[str, s
     """
     try:
         uri = Path(path).resolve().as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=timeout) as db:
+        with closing(sqlite3.connect(uri, uri=True, timeout=timeout)) as db:
             db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
     except sqlite3.DatabaseError as exc:
         return {"status": "error", "integrity": "not_checked", "error": str(exc)}
