@@ -3,12 +3,13 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from .document_indexer import DocumentIndexer
+from .document_indexer import DocumentIndexer, IndexBusyError
 from .embeddings import EmbeddingClient
 from .indexer import Indexer
 from .maintenance import verify_database
@@ -397,17 +398,20 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/documents/status":
             if not documents_store:
                 return self.send_json(404, {"error": "documents are not configured"})
-            integrity = verify_database(
-                documents_store.db.execute("PRAGMA database_list").fetchone()[2]
-            )
-            document_status = DocumentIndexer(
-                DOCUMENTS_ROOT,
-                documents_store,
-                documents_vector_store,
-                embedder.embed,
-                include_patterns=DOCUMENTS_INCLUDE_PATTERNS,
-                exclude_patterns=DOCUMENTS_EXCLUDE_PATTERNS,
-            ).status()
+            try:
+                integrity = verify_database(documents_store.path, documents_store.read_timeout)
+                document_status = DocumentIndexer(
+                    DOCUMENTS_ROOT,
+                    documents_store,
+                    documents_vector_store,
+                    embedder.embed,
+                    include_patterns=DOCUMENTS_INCLUDE_PATTERNS,
+                    exclude_patterns=DOCUMENTS_EXCLUDE_PATTERNS,
+                    read_only=True,
+                ).status()
+            except sqlite3.OperationalError as exc:
+                logger.warning("%s unavailable: %s", parsed.path, exc)
+                return self.send_json(503, {"error": "documents database busy", "detail": str(exc)})
             status = {"status": integrity["status"], "database": integrity, **document_status}
             if documents_vector_store:
                 try:
@@ -431,8 +435,13 @@ class Handler(BaseHTTPRequestHandler):
                 embedder.embed,
                 include_patterns=DOCUMENTS_INCLUDE_PATTERNS,
                 exclude_patterns=DOCUMENTS_EXCLUDE_PATTERNS,
+                read_only=True,
             )
-            return self.send_json(200, {"errors": indexer.errors(limit=limit)})
+            try:
+                return self.send_json(200, {"errors": indexer.errors(limit=limit)})
+            except sqlite3.OperationalError as exc:
+                logger.warning("%s unavailable: %s", parsed.path, exc)
+                return self.send_json(503, {"error": "documents database busy", "detail": str(exc)})
         if parsed.path == "/promotion/candidates":
             return self.send_json(200, {"candidates": candidates(ROOT)})
         if parsed.path == "/archive/status":
@@ -601,6 +610,8 @@ class Handler(BaseHTTPRequestHandler):
                 ).scan(max_files=max_files)
                 logger.info("%s %s", self.path, stats.as_dict())
                 return self.send_json(200, stats.as_dict())
+            except IndexBusyError as exc:
+                return self.send_json(409, {"error": str(exc)})
             except (json.JSONDecodeError, OSError, UnicodeError, ValueError) as exc:
                 logger.warning("%s failed: %s", self.path, exc)
                 return self.send_json(400, {"error": str(exc)})
