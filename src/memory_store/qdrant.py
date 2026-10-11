@@ -150,9 +150,7 @@ class QdrantStore:
     def reconcile_missing(self, store, embed, limit=1000):
         rows = store.db.execute("SELECT id, path, heading, body, line FROM chunks").fetchall()
         present = self.point_ids([row[0] for row in rows])
-        missing = [
-            row for row in rows if point_id(row[0]) not in present
-        ]
+        missing = [row for row in rows if point_id(row[0]) not in present]
         selected = missing[:limit]
         self.upsert([(r[0], r[1], r[2], r[3], r[4]) for r in selected], embed)
         return {"reconciled": len(selected), "remaining": len(missing) - len(selected)}
