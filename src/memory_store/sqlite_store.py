@@ -165,9 +165,7 @@ class SQLiteStore:
                 "chunks": fts_count,
                 "missing": missing_fts,
                 "orphaned": orphaned_fts,
-                "inSync": (
-                    fts_count == chunk_count and missing_fts == 0 and orphaned_fts == 0
-                ),
+                "inSync": (fts_count == chunk_count and missing_fts == 0 and orphaned_fts == 0),
             },
             "index": {**metadata, "age_seconds": age},
         }
