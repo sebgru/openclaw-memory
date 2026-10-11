@@ -155,9 +155,7 @@ class QdrantStore:
         with store._read_connection() as db:
             sample = [
                 row[0]
-                for row in db.execute(
-                    "SELECT id FROM chunks ORDER BY id LIMIT ?", (sample_size,)
-                )
+                for row in db.execute("SELECT id FROM chunks ORDER BY id LIMIT ?", (sample_size,))
             ]
         present = self.point_ids(sample)
         expected = {point_id(chunk_id) for chunk_id in sample}

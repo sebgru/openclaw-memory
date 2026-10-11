@@ -494,9 +494,7 @@ class Handler(BaseHTTPRequestHandler):
                 archive_store.database_path, archive_store.read_timeout
             )
             with archive_store._read_connection() as db:
-                archive_status = archive_store.status(
-                    db, include_fts_diagnostics=False, quick=True
-                )
+                archive_status = archive_store.status(db, include_fts_diagnostics=False, quick=True)
             status = {
                 "status": integrity["status"],
                 "database": integrity,

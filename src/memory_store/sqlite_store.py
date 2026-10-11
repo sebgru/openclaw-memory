@@ -185,7 +185,7 @@ class SQLiteStore:
         terms = [term.strip('"') for term in query.split() if len(term.strip('"')) >= 3]
         if not terms:
             return []
-        match = " AND ".join('"' + term.replace('"', '') + '"' for term in terms)
+        match = " AND ".join('"' + term.replace('"', "") + '"' for term in terms)
         limit = max(1, min(int(limit), 100))
         with self._read_connection() as db:
             rows = db.execute(

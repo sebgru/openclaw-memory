@@ -69,8 +69,11 @@ class DocumentsEndpointSafetyTests(unittest.TestCase):
             def bounded_diagnostics(self, store):
                 return {"parity": "sampled", "sample": {"size": 1}}
 
-        with patch.object(server, "documents_vector_store", Vectors()), patch.object(
-            server, "verify_database", side_effect=AssertionError("full integrity scan")
+        with (
+            patch.object(server, "documents_vector_store", Vectors()),
+            patch.object(
+                server, "verify_database", side_effect=AssertionError("full integrity scan")
+            ),
         ):
             status, body = self.request("GET", "/documents/status")
         self.assertEqual(status, 200)
@@ -92,9 +95,13 @@ class DocumentsEndpointSafetyTests(unittest.TestCase):
             def bounded_diagnostics(self, store):
                 return {"parity": "sampled", "sample": {"size": 1}}
 
-        with patch.object(server, "archive_store", archive), patch.object(
-            server, "archive_vector_store", Vectors()
-        ), patch.object(server, "verify_database", side_effect=AssertionError("full integrity scan")):
+        with (
+            patch.object(server, "archive_store", archive),
+            patch.object(server, "archive_vector_store", Vectors()),
+            patch.object(
+                server, "verify_database", side_effect=AssertionError("full integrity scan")
+            ),
+        ):
             status, body = self.request("GET", "/archive/status")
         self.assertEqual(status, 200)
         self.assertEqual(body["database"]["integrity"], "not_checked")

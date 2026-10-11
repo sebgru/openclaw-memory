@@ -59,17 +59,25 @@ class ApiTests(unittest.TestCase):
 
         class Semantic:
             def search(self, vector, limit):
-                return [{"id": "unrelated", "text": "ASUS router manual", "path": "router.md",
-                         "score": 0.8}]
+                return [
+                    {
+                        "id": "unrelated",
+                        "text": "ASUS router manual",
+                        "path": "router.md",
+                        "score": 0.8,
+                    }
+                ]
 
         try:
             server.store.search = lambda query, limit: [
-                {"id": "invoice", "text": "Denon AVR-X1700HDAB invoice", "path": "receipt.md",
-                 "score": 0.0}
+                {
+                    "id": "invoice",
+                    "text": "Denon AVR-X1700HDAB invoice",
+                    "path": "receipt.md",
+                    "score": 0.0,
+                }
             ]
-            results = server.hybrid_search(
-                "Denon AVR-X1700HDAB", 2, server.store, Semantic()
-            )
+            results = server.hybrid_search("Denon AVR-X1700HDAB", 2, server.store, Semantic())
             self.assertEqual(results[0]["id"], "invoice")
             self.assertTrue(results[0]["exact_match"])
         finally:
@@ -79,14 +87,24 @@ class ApiTests(unittest.TestCase):
         class CandidateStore:
             def search(self, query, limit):
                 return [
-                    {"id": f"generic-{i}", "text": "Denon receiver overview", "path": f"{i}.md",
-                     "score": 1.0}
+                    {
+                        "id": f"generic-{i}",
+                        "text": "Denon receiver overview",
+                        "path": f"{i}.md",
+                        "score": 1.0,
+                    }
                     for i in range(limit)
                 ]
 
             def search_exact(self, query, limit):
-                return [{"id": "invoice", "text": "Denon AVR-X1700HDAB invoice",
-                         "path": "invoice.md", "score": 0.0}]
+                return [
+                    {
+                        "id": "invoice",
+                        "text": "Denon AVR-X1700HDAB invoice",
+                        "path": "invoice.md",
+                        "score": 0.0,
+                    }
+                ]
 
         results = server.hybrid_search("Denon AVR-X1700HDAB", 1, CandidateStore(), None)
         self.assertEqual(results[0]["id"], "invoice")
