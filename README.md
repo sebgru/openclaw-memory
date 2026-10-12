@@ -83,6 +83,7 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
   read as semantic-complete; it is omitted when nothing degraded. An unconfigured source selected by `scope`
   also adds `<source>: not configured`, so clients that ignore `coverage`
   still see the gap. Clients that ignore unknown fields are unaffected.
+- `/unified/search` adds `low_confidence: true` and a `confidence_note` when no result has lexical or exact evidence and every semantic similarity is below `LOW_CONFIDENCE_SEMANTIC_FLOOR` (default 0.6), i.e. the query probably has no relevant match. Results are still returned. Queries whose terms all appear in a chunk (two or more terms) get `FULL_COVERAGE_BOOST` (default 1.0) so multi-identifier lexical matches rank above semantic-only hits.
 - `profile=tool` preserves the broad, backward-compatible result set.
   `profile=prompt` applies normalized evidence thresholds and per-source quotas
   so automatic recall cannot be dominated by one corpus. Thresholds apply to

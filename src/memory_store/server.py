@@ -103,6 +103,14 @@ PROMPT_MIN_RELEVANCE = env_float("PROMPT_MIN_RELEVANCE", 0.2)
 EXACT_MATCH_BOOST = env_float("EXACT_MATCH_BOOST", 1.0)
 TERM_COVERAGE_WEIGHT = env_float("TERM_COVERAGE_WEIGHT", 0.3)
 MIN_TERM_LENGTH = 3
+# Full coverage of every query term (>= 2 distinctive terms) is treated as a
+# strong lexical signal. It must outweigh a semantic-only hit, whose legacy
+# score starts at raw cosine similarity (~0.5-0.7), or lexical matches for
+# multi-identifier queries are crowded out of the ranking entirely.
+FULL_COVERAGE_BOOST = env_float("FULL_COVERAGE_BOOST", 1.0)
+# A result set with no lexical evidence and no semantic similarity at or above
+# this floor is reported as low confidence (probably nothing relevant exists).
+LOW_CONFIDENCE_SEMANTIC_FLOOR = env_float("LOW_CONFIDENCE_SEMANTIC_FLOOR", 0.6)
 PROMPT_SOURCE_QUOTAS = {
     "memory": env_int("PROMPT_MEMORY_QUOTA", 3),
     "artifact": env_int("PROMPT_ARTIFACT_QUOTA", 1),
@@ -243,7 +251,25 @@ def exact_match_bonus(query, item):
     if not terms:
         return 0.0, False
     matched = sum(1 for term in terms if term in haystack or term in path_text)
+    if matched == len(terms) and len(terms) >= 2:
+        return FULL_COVERAGE_BOOST, False
     return TERM_COVERAGE_WEIGHT * matched / len(terms), False
+
+
+def is_low_confidence(results):
+    """True when results carry no lexical or exact evidence and weak semantic similarity.
+
+    Results lacking the relevance fields (unknown) are never reported as low
+    confidence. An empty result list is not "low confidence"; it is just empty.
+    """
+    if not results or any("semantic_similarity" not in item for item in results):
+        return False
+    for item in results:
+        if item.get("lexical_evidence", 0) > 0 or item.get("exact_match"):
+            return False
+        if item["semantic_similarity"] >= LOW_CONFIDENCE_SEMANTIC_FLOOR:
+            return False
+    return True
 
 
 def unified_source(result, archive=False, document=False):
@@ -594,6 +620,12 @@ class Handler(BaseHTTPRequestHandler):
                 payload["degraded"] = degraded
             if warnings:
                 payload["warnings"] = warnings
+            if is_low_confidence(results):
+                payload["low_confidence"] = True
+                payload["confidence_note"] = (
+                    "no lexical match and weak semantic similarity; "
+                    "results are probably not relevant to the query"
+                )
             return self.send_json(200, payload)
         self.send_json(404, {"error": "not found"})
 

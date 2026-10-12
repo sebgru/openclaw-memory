@@ -424,6 +424,78 @@ class ApiTests(unittest.TestCase):
         finally:
             server.archive_store = original_archive
 
+    def test_multi_identifier_lexical_match_outranks_semantic_only_hits(self):
+        class Store:
+            def search(self, query, limit):
+                return [
+                    {
+                        "id": "note",
+                        "text": "EXACT_MATCH_BOOST and TERM_COVERAGE_WEIGHT tuning",
+                        "path": "note.md",
+                        "score": 9.0,
+                    }
+                ]
+
+        class Semantic:
+            def search(self, vector, limit):
+                return [
+                    {"id": f"sem-{i}", "text": "startup trim", "path": f"{i}.md", "score": 0.52}
+                    for i in range(3)
+                ]
+
+        results = server.hybrid_search(
+            "EXACT_MATCH_BOOST TERM_COVERAGE_WEIGHT", 3, Store(), Semantic()
+        )
+        self.assertEqual(results[0]["id"], "note")
+        self.assertGreater(results[0]["lexical_evidence"], 0)
+
+    def test_partial_term_coverage_does_not_outrank_strong_semantic_hit(self):
+        boost, exact = server.exact_match_bonus("alpha beta", {"text": "alpha only"})
+        self.assertFalse(exact)
+        self.assertLess(boost, 0.5)
+
+    def test_low_confidence_detection(self):
+        weak = {"semantic_similarity": 0.55, "lexical_evidence": 0}
+        self.assertTrue(server.is_low_confidence([weak, weak]))
+        self.assertFalse(server.is_low_confidence([]))
+        self.assertFalse(server.is_low_confidence([{"id": "x"}]))
+        self.assertFalse(server.is_low_confidence([weak, {**weak, "lexical_evidence": 1.2}]))
+        self.assertFalse(server.is_low_confidence([{**weak, "exact_match": True}]))
+        self.assertFalse(server.is_low_confidence([{**weak, "semantic_similarity": 0.8}]))
+
+    def test_unified_endpoint_flags_low_confidence_for_nonexistent_token(self):
+        original = server.unified_search_with_coverage
+        weak = {
+            "id": "a",
+            "source": "memory",
+            "score": 0.5,
+            "lexical_evidence": 0,
+            "semantic_similarity": 0.56,
+            "exact_match": False,
+        }
+        coverage = {"main": "searched", "archive": "not_searched", "documents": "not_searched"}
+        try:
+            server.unified_search_with_coverage = lambda query, limit, scope: (
+                [weak],
+                [],
+                coverage,
+                {},
+            )
+            status, payload = self.request_json("/unified/search?q=zzqx-nonexistent")
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["low_confidence"])
+            self.assertIn("confidence_note", payload)
+            server.unified_search_with_coverage = lambda query, limit, scope: (
+                [{**weak, "lexical_evidence": 3.0}],
+                [],
+                coverage,
+                {},
+            )
+            status, payload = self.request_json("/unified/search?q=real")
+            self.assertNotIn("low_confidence", payload)
+        finally:
+            server.unified_search_with_coverage = original
+
     def test_unified_endpoint_omits_warnings_when_empty(self):
         original = server.unified_search_with_coverage
         try:
