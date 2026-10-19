@@ -110,6 +110,18 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
   is bounded to 1–1000; the endpoint returns `404` when the document corpus is
   not configured. `GET /documents/status` includes the same list inline as
   `errors` together with the `files_with_errors` count.
+- `GET /documents/parity?limit=256&after=<cursor>` is a read-only, exact
+  document/vector parity walk (unlike the sampled `/documents/status`). Each
+  call checks one keyset page of chunk ids (`id > after`, ordered by id,
+  `limit` 1–1000, default 256) against Qdrant and returns `checked`, `missing`,
+  up to 20 `missing_ids`, `chunks_total`, `next_cursor`, and `complete`. Repeat
+  with `after=<next_cursor>` until `complete` is `true`; sum `checked` and
+  `missing` for the totals. A walk is only a full verdict once it has finished,
+  and rows added or removed mid-walk may be missed or counted once. Cost is one
+  indexed SQLite page read, one `COUNT(*)`, and one Qdrant point lookup per
+  page; nothing is written and no embeddings are computed. Errors: `400` for a
+  bad `limit`/`after`, `404` when documents or Qdrant are not configured,
+  `502` when Qdrant fails, `503` when the database is busy.
 - `POST /documents/reconcile` uses the same explicit `{"confirm":true}` vector
   repair contract as the main/archive reconciliation endpoints.
 - `GET /status` (and `/healthz`) report SQLite integrity, index freshness (`last_index_started_at`, `last_index_completed_at`, `last_index_error`, `age_seconds`), and — when Qdrant is configured — vector parity diagnostics (`points`, `chunks`, `missing_vectors`).

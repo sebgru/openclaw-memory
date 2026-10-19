@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from memory_store import document_indexer, server
 from memory_store.document_indexer import DocumentIndexer, IndexBusyError
+from memory_store.qdrant import QdrantStore
 from memory_store.sqlite_store import SQLiteStore
 
 
@@ -83,6 +84,52 @@ class DocumentsEndpointSafetyTests(unittest.TestCase):
         self.assertIsNone(body["chunks"])
         self.assertIsNone(body["lexicalIndex"]["inSync"])
         self.assertEqual(body["vectors"]["parity"], "sampled")
+
+    def test_documents_parity_pages_with_keyset_cursor(self):
+        from memory_store.qdrant import point_id
+
+        self.store.upsert_file(
+            "a.md", "d", [("c1", "H", "x", 1), ("c2", "H", "y", 2), ("c3", "H", "z", 3)]
+        )
+        seen = []
+
+        class Vectors:
+            def parity_page(self, store, after, limit):
+                return QdrantStore.parity_page(self, store, after, limit)
+
+            def point_ids(self, ids):
+                seen.append(list(ids))
+                return {point_id("c1"), point_id("c3")} & {point_id(i) for i in ids}
+
+        with patch.object(server, "documents_vector_store", Vectors()):
+            status, first = self.request("GET", "/documents/parity?limit=2")
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                (first["checked"], first["missing"], first["complete"]), (2, 1, False)
+            )
+            self.assertEqual(first["missing_ids"], ["c2"])
+            self.assertEqual(first["chunks_total"], 3)
+            self.assertEqual(first["next_cursor"], "c2")
+            status, last = self.request("GET", "/documents/parity?limit=2&after=c2")
+        self.assertEqual((last["checked"], last["missing"], last["complete"]), (1, 0, True))
+        self.assertIsNone(last["next_cursor"])
+        self.assertEqual(seen, [["c1", "c2"], ["c3"]])
+
+    def test_documents_parity_validates_input(self):
+        with patch.object(server, "documents_vector_store", object()):
+            for query in ("limit=0", "limit=1001", "limit=x", "after=" + "a" * 1025, "after=%00"):
+                status, _ = self.request("GET", "/documents/parity?" + query)
+                self.assertEqual(status, 400, query)
+        self.assertEqual(self.request("GET", "/documents/parity")[0], 404)
+
+    def test_documents_parity_reports_vector_failure(self):
+        class Vectors:
+            def parity_page(self, *args):
+                raise OSError("qdrant down")
+
+        with patch.object(server, "documents_vector_store", Vectors()):
+            status, body = self.request("GET", "/documents/parity")
+        self.assertEqual(status, 502)
 
     def test_archive_status_skips_full_integrity_and_uses_bounded_vector_diagnostics(self):
         archive = SQLiteStore(Path(self.tmp.name) / "archive.db", read_timeout=0.2)

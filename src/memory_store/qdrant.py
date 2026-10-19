@@ -171,6 +171,35 @@ class QdrantStore:
             "parity": "sampled",
         }
 
+    def parity_page(self, store, after="", limit=256, missing_sample=20):
+        """Check one keyset page of chunk ids against Qdrant (read-only).
+
+        Pages are ordered by chunk id and resume strictly after ``after``, so a
+        full walk never holds more than ``limit`` ids in memory and stays
+        consistent while rows are inserted or deleted between requests.
+        """
+        with store._read_connection() as db:
+            rows = [
+                row[0]
+                for row in db.execute(
+                    "SELECT id FROM chunks WHERE id > ? ORDER BY id LIMIT ?",
+                    (after, limit + 1),
+                )
+            ]
+            total = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        present = self.point_ids(page)
+        missing = [cid for cid in page if point_id(cid) not in present]
+        return {
+            "checked": len(page),
+            "missing": len(missing),
+            "missing_ids": missing[:missing_sample],
+            "chunks_total": total,
+            "next_cursor": page[-1] if has_more else None,
+            "complete": not has_more,
+        }
+
     def reconcile_missing(self, store, embed, limit=1000):
         rows = store.db.execute("SELECT id, path, heading, body, line FROM chunks").fetchall()
         present = self.point_ids([row[0] for row in rows])
