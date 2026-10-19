@@ -104,9 +104,7 @@ class DocumentsEndpointSafetyTests(unittest.TestCase):
         with patch.object(server, "documents_vector_store", Vectors()):
             status, first = self.request("GET", "/documents/parity?limit=2")
             self.assertEqual(status, 200)
-            self.assertEqual(
-                (first["checked"], first["missing"], first["complete"]), (2, 1, False)
-            )
+            self.assertEqual((first["checked"], first["missing"], first["complete"]), (2, 1, False))
             self.assertEqual(first["missing_ids"], ["c2"])
             self.assertEqual(first["chunks_total"], 3)
             self.assertEqual(first["next_cursor"], "c2")
@@ -130,6 +128,22 @@ class DocumentsEndpointSafetyTests(unittest.TestCase):
         with patch.object(server, "documents_vector_store", Vectors()):
             status, body = self.request("GET", "/documents/parity")
         self.assertEqual(status, 502)
+
+    def test_documents_parity_requires_documents_configuration(self):
+        with patch.object(server, "documents_store", None):
+            status, body = self.request("GET", "/documents/parity")
+        self.assertEqual(status, 404)
+        self.assertEqual(body, {"error": "documents are not configured"})
+
+    def test_documents_parity_reports_database_busy(self):
+        class Vectors:
+            def parity_page(self, *args):
+                raise sqlite3.OperationalError("database is locked")
+
+        with patch.object(server, "documents_vector_store", Vectors()):
+            status, body = self.request("GET", "/documents/parity")
+        self.assertEqual(status, 503)
+        self.assertEqual(body["error"], "documents database busy")
 
     def test_archive_status_skips_full_integrity_and_uses_bounded_vector_diagnostics(self):
         archive = SQLiteStore(Path(self.tmp.name) / "archive.db", read_timeout=0.2)
