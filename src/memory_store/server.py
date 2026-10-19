@@ -488,6 +488,30 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     status["vectors"] = {"status": "error", "error": str(exc)}
             return self.send_json(200, status)
+        if parsed.path == "/documents/parity":
+            if not documents_store:
+                return self.send_json(404, {"error": "documents are not configured"})
+            if not documents_vector_store:
+                return self.send_json(404, {"error": "vector store is not configured"})
+            try:
+                limit = int(params.get("limit", [256])[0])
+            except ValueError:
+                return self.send_json(400, {"error": "limit must be an integer"})
+            if not 1 <= limit <= 1000:
+                return self.send_json(400, {"error": "limit must be between 1 and 1000"})
+            after = params.get("after", [""])[0]
+            if len(after) > 1024 or "\x00" in after:
+                return self.send_json(400, {"error": "after is not a valid cursor"})
+            try:
+                page = documents_vector_store.parity_page(documents_store, after, limit)
+            except sqlite3.OperationalError as exc:
+                logger.warning("%s unavailable: %s", parsed.path, exc)
+                return self.send_json(503, {"error": "documents database busy", "detail": str(exc)})
+            except Exception as exc:
+                return self.send_json(
+                    502, {"error": "vector store unavailable", "detail": str(exc)}
+                )
+            return self.send_json(200, {"status": "ok", "parity": "page", **page})
         if parsed.path == "/documents/errors":
             if not documents_store:
                 return self.send_json(404, {"error": "documents are not configured"})
