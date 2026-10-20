@@ -140,6 +140,14 @@ To bootstrap an existing session corpus into the archive, use
 corpus format (each line starting with `[<jsonl-path>#L<n>]`), never
 overwrites existing destination files, and writes a SHA-256 manifest.
 
+To archive a session fetched through chunked `sessions_history` pages, save each
+page as a JSON file (a message list, or an object with `sessionKey` and
+`messages`) and run `scripts/import_history_pages.py --source-root <pages-dir>
+--destination <archive-dir> --manifest <manifest.json> [--session-key <key>]`.
+Pages are merged in filename order, overlapping messages are de-duplicated, and
+existing destination files are never overwritten. The script does not index;
+run `POST /archive/index` afterwards.
+
 Only Markdown files are read. Symlinks are ignored. Normal indexing excludes
 `memory/dreaming/`, `memory/.dreams/`, digests, handoffs, system-health output,
 review candidates, archives, and `exchange/` at any depth. File paths in
