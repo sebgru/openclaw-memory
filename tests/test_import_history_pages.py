@@ -43,7 +43,7 @@ class ImportHistoryPagesTests(unittest.TestCase):
         import_pages(self.src, self.dst, self.manifest)
         target = next(self.dst.glob("*.md"))
         target.write_text("keep")
-        again = import_pages(self.src, self.dst, self.manifest)
+        again = import_pages(self.src, self.dst, self.tmp / "m2.json")
         self.assertEqual(again, {"imported": 0, "skipped": 1})
         self.assertEqual(target.read_text(), "keep")
 
@@ -56,6 +56,59 @@ class ImportHistoryPagesTests(unittest.TestCase):
             import_pages(self.src, self.dst, self.manifest)
         with self.assertRaises(FileNotFoundError):
             import_pages(self.tmp / "missing", self.dst, self.manifest)
+
+    def test_real_shape_page_orders_by_seq_regardless_of_filename(self):
+        # Sanitized sessions_history shape: ids/seq under __openclaw, epoch-ms timestamps.
+        def real(seq, ts):
+            return {
+                "role": "user" if seq == 1 else "assistant",
+                "content": f"[redacted {seq}]",
+                "timestamp": ts,
+                "idempotencyKey": f"k{seq}",
+                "__openclaw": {"id": f"id-{seq}", "seq": seq, "recordTimestampMs": ts},
+            }
+
+        flags = {"truncated": False, "contentTruncated": False, "contentRedacted": False}
+        # Lexicographic filename order (page10 < page2) is the reverse of fetch order.
+        pages = {
+            "page2.json": (2, [real(3, 30), real(4, 40)]),
+            "page10.json": (4, [real(5, 50)]),
+            "page1.json": (0, [real(1, 0), real(2, 20)]),
+        }
+        for name, (offset, messages) in pages.items():
+            page = {"sessionKey": "k", "offset": offset, "messages": messages, **flags}
+            self.write(name, page)
+        import_pages(self.src, self.dst, self.manifest)
+        body = next(self.dst.glob("*.md")).read_text()
+        positions = [body.index(f"[redacted {n}]") for n in range(1, 6)]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("1970-01-01 00:00:00 UTC", body)
+
+    def test_orders_by_offset_when_no_seq(self):
+        self.write("a.json", {"sessionKey": "k", "offset": 2, "messages": [msg(3), msg(4)]})
+        self.write("b.json", {"sessionKey": "k", "offset": 0, "messages": [msg(1), msg(2)]})
+        import_pages(self.src, self.dst, self.manifest)
+        body = next(self.dst.glob("*.md")).read_text()
+        self.assertLess(body.index("text 2"), body.index("text 3"))
+
+    def test_rejects_lossy_pages_unless_allowed(self):
+        for flag in ("truncated", "contentTruncated", "contentRedacted"):
+            self.write("p.json", {"sessionKey": "k", "messages": [msg(1)], flag: True})
+            with self.assertRaises(ValueError):
+                import_pages(self.src, self.dst, self.manifest)
+            self.assertFalse(self.dst.exists())
+        self.write("p.json", {"sessionKey": "k", "messages": [msg(1)], "truncated": True})
+        self.assertEqual(
+            import_pages(self.src, self.dst, self.manifest, allow_lossy=True)["imported"], 1
+        )
+
+    def test_never_overwrites_existing_manifest(self):
+        self.write("p.json", {"sessionKey": "k", "messages": [msg(1)]})
+        self.manifest.write_text("precious")
+        with self.assertRaises(FileExistsError):
+            import_pages(self.src, self.dst, self.manifest)
+        self.assertEqual(self.manifest.read_text(), "precious")
+        self.assertFalse(self.dst.exists())
 
 
 if __name__ == "__main__":
