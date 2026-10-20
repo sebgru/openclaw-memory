@@ -18,7 +18,7 @@ import argparse
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -45,7 +45,8 @@ def _load_page(
         if lossy and not allow_lossy:
             raise ValueError(f"lossy page ({', '.join(lossy)}): {path}; use --allow-lossy")
         key = key or data.get("sessionKey")
-        offset = data.get("offset") if isinstance(data.get("offset"), int) else 0
+        raw_offset = data.get("offset")
+        offset = raw_offset if isinstance(raw_offset, int) else 0
         data = data.get("messages")
     if not isinstance(data, list) or not all(isinstance(m, dict) for m in data):
         raise ValueError(f"not a sessions_history page: {path}")
@@ -67,7 +68,7 @@ def _seq(message: dict) -> int | None:
 def _when(message: dict) -> str:
     ts = message.get("timestamp")
     if isinstance(ts, (int, float)) and not isinstance(ts, bool):
-        return datetime.fromtimestamp(ts / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        return datetime.fromtimestamp(ts / 1000, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     return str(ts) if ts else ""
 
 
@@ -99,7 +100,7 @@ def import_pages(
     ordered: dict[str, list[dict]] = {}
     for key, entries in sessions.items():
         if all(_seq(m) is not None for _, m in entries):
-            entries.sort(key=lambda e: _seq(e[1]))
+            entries.sort(key=lambda e: _seq(e[1]) or 0)
         else:
             entries.sort(key=lambda e: e[0])
         ordered[key] = [m for _, m in entries]
