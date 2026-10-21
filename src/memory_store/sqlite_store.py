@@ -324,13 +324,15 @@ class SQLiteStore:
         results: list[dict] = []
         for row in rows:
             words = re.findall(r"[\w-]+", f"{row['heading'] or ''} {row['body']} {row['path']}")
-            hit = any(
-                _is_typo_variant(token, word)
-                for token in tokens
-                for word in words
-                if len(word) >= 5
+            matched_tokens = sorted(
+                {
+                    token
+                    for token in tokens
+                    for word in words
+                    if len(word) >= 5 and _is_typo_variant(token, word)
+                }
             )
-            if hit:
+            if matched_tokens:
                 results.append(
                     {
                         "id": row["id"],
@@ -340,6 +342,7 @@ class SQLiteStore:
                         "line": row["line"],
                         "score": 1.0 - len(results) / (FUZZY_SCAN_LIMIT + 1),
                         "fuzzy_match": True,
+                        "fuzzy_terms": matched_tokens,
                     }
                 )
                 if len(results) >= limit:
