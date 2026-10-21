@@ -288,7 +288,9 @@ def exact_match_bonus(query, item, fuzzy_terms=()):
     if not terms:
         return 0.0, False
     fuzzy_terms = set(fuzzy_terms)
-    matched = sum(1 for term in terms if term in haystack or term in path_text or term in fuzzy_terms)
+    matched = sum(
+        1 for term in terms if term in haystack or term in path_text or term in fuzzy_terms
+    )
     if matched == len(terms) and len(terms) >= 2:
         return FULL_COVERAGE_BOOST, False
     return TERM_COVERAGE_WEIGHT * matched / len(terms), False
