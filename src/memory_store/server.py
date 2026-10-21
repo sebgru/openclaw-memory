@@ -201,6 +201,9 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         if not item.get("fuzzy_match"):
             item["fuzzy_match"] = True
             item["fuzzy_score"] = fuzzy_rank_score
+        item["fuzzy_terms"] = sorted(
+            set(item.get("fuzzy_terms", [])) | set(row.get("fuzzy_terms", []))
+        )
         item["score"] += fuzzy_rank_score
     for rank, row in enumerate(semantic):
         score = 1 / (60 + rank + 1)
@@ -230,7 +233,7 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         )
         semantic_relevance = max(0.0, min(1.0, item["semantic_similarity"]))
         item["relevance_score"] = max(lexical_relevance, semantic_relevance)
-        bonus, exact = exact_match_bonus(query, item)
+        bonus, exact = exact_match_bonus(query, item, item.get("fuzzy_terms", []))
         item["exact_match"] = exact
         item["score"] += bonus
     return [
@@ -272,7 +275,7 @@ def _relaxed_text(value):
     )
 
 
-def exact_match_bonus(query, item):
+def exact_match_bonus(query, item, fuzzy_terms=()):
     """Promote exact entity/model matches above semantically similar results."""
     needle = _relaxed_text(query)
     if not needle:
@@ -284,7 +287,12 @@ def exact_match_bonus(query, item):
     terms = [term for term in needle.split() if len(term) >= MIN_TERM_LENGTH]
     if not terms:
         return 0.0, False
-    matched = sum(1 for term in terms if term in haystack or term in path_text)
+    fuzzy_terms = set(fuzzy_terms)
+    matched = sum(
+        1
+        for term in terms
+        if term in haystack or term in path_text or term in fuzzy_terms
+    )
     if matched == len(terms) and len(terms) >= 2:
         return FULL_COVERAGE_BOOST, False
     return TERM_COVERAGE_WEIGHT * matched / len(terms), False

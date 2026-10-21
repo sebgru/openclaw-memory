@@ -164,6 +164,34 @@ class ApiTests(unittest.TestCase):
         finally:
             selected.close()
 
+    def test_fuzzy_target_survives_common_term_crowding(self):
+        from memory_store.sqlite_store import SQLiteStore
+
+        selected = SQLiteStore()
+        try:
+            selected.upsert_file(
+                "sessions/mat.md",
+                "digest",
+                [("mat", "Telegram", "die fyssmatte X3 fahrerseite hinten original BMW", 4)],
+            )
+            for i in range(100):
+                selected.upsert_file(
+                    f"bmw/{i:03}.md",
+                    "digest",
+                    [(f"bmw{i}", "BMW", f"die BMW X3 elektrische Heckklappe {i}", 1)],
+                )
+
+            results = server.hybrid_search("die fussmatte X3", 10, selected, None)
+            self.assertEqual(results[0]["path"], "sessions/mat.md")
+            self.assertTrue(results[0]["fuzzy_match"])
+            self.assertFalse(results[0]["exact_match"])
+            self.assertEqual(results[0]["fuzzy_terms"], ["fussmatte"])
+            self.assertEqual(results[0]["lexical_evidence"], 0)
+            self.assertEqual(results[0]["relevance_score"], 0)
+            self.assertTrue(server.is_low_confidence([results[0]]))
+        finally:
+            selected.close()
+
     def test_fuzzy_candidates_cannot_outrank_lexical_hits(self):
         from memory_store.sqlite_store import SQLiteStore
 
