@@ -128,7 +128,7 @@ class CoreTests(unittest.TestCase):
         for token, word in [
             ("fussmatte", "fyssmatte"), ("fussmatte", "Fußmatte"),
             ("fussmatte", "fusmatte"), ("fussmatte", "fussmtate"),
-            ("rechnung", "rechmung"), ("heckklappe", "Heckklape"),
+            ("rechnung", "rechmung"), ("heckklappe", "Hecklappe"),
         ]:
             self.assertTrue(_is_typo_variant(_fold(token), word), (token, word))
         # Raw exact hits are lexical evidence, not typos.
