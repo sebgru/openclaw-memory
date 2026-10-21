@@ -73,7 +73,9 @@ archive_vector_store = (
     else None
 )
 documents_store = (
-    SQLiteStore(os.getenv("DOCUMENTS_SQLITE_PATH", "documents.db"), DIM) if DOCUMENTS_ROOT else None
+    SQLiteStore(os.getenv("DOCUMENTS_SQLITE_PATH", "documents.db"), DIM, enable_fuzzy=False)
+    if DOCUMENTS_ROOT
+    else None
 )
 documents_vector_store = (
     QdrantStore(
@@ -132,6 +134,11 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         vector_store if selected_vector_store is _DEFAULT_VECTOR else selected_vector_store
     )
     lexical = selected_store.search(query, limit * 3)
+    fuzzy = (
+        selected_store.search_fuzzy(query, limit * 3)
+        if hasattr(selected_store, "search_fuzzy")
+        else []
+    )
     if hasattr(selected_store, "search_exact"):
         exact_candidates = selected_store.search_exact(query, min(limit * 2, 100))
         by_id = {row["id"]: row for row in lexical}
@@ -168,6 +175,27 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         item["score"] += score
         item["lexical_score"] += score
         item["lexical_evidence"] = max(item["lexical_evidence"], row.get("score", 0))
+    # Typo-tolerant candidates are kept distinct from true lexical evidence:
+    # they can improve recall/ranking but must not silently turn a weak match
+    # into a confident one.
+    for row in fuzzy:
+        item = merged.setdefault(
+            point_id(row["id"]),
+            {
+                **row,
+                "score": 0,
+                "lexical_score": 0,
+                "semantic_score": 0,
+                "lexical_evidence": 0,
+                "semantic_similarity": 0,
+                "fuzzy_match": True,
+                "fuzzy_score": row["score"],
+            },
+        )
+        if not item.get("fuzzy_match"):
+            item["fuzzy_match"] = True
+            item["fuzzy_score"] = row["score"]
+        item["score"] += row["score"]
     for rank, row in enumerate(semantic):
         score = 1 / (60 + rank + 1)
         item = merged.setdefault(

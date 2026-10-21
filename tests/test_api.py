@@ -118,6 +118,26 @@ class ApiTests(unittest.TestCase):
     def test_vector_status_without_vector_store_returns_none(self):
         self.assertIsNone(server.vector_status(server.store, None, bounded=True))
 
+    def test_hybrid_search_surfaces_typo_candidate_with_weak_lexical_match(self):
+        from memory_store.sqlite_store import SQLiteStore
+
+        selected = SQLiteStore()
+        try:
+            selected.upsert_file(
+                "sessions/mat.md", "digest",
+                [("mat", "Telegram", "fyssmatte X3 fahrerseite hinten", 4)],
+            )
+            results = server.hybrid_search("die fussmatte X3", 3, selected, None)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["path"], "sessions/mat.md")
+            self.assertTrue(results[0]["fuzzy_match"])
+            # FTS finds only the exact X3 token; fuzzy score adds separate
+            # retrieval evidence without pretending the misspelled word matched.
+            self.assertLess(results[0]["lexical_evidence"], 0.01)
+            self.assertGreater(results[0]["fuzzy_score"], 0.72)
+        finally:
+            selected.close()
+
     def test_search_labels_output_registry_as_artifact(self):
         original = server.store.search
         try:

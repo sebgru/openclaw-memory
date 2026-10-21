@@ -46,6 +46,37 @@ class CoreTests(unittest.TestCase):
         results = self.store.search_exact("Denon AVR-X1700HDAB", limit=500)
         self.assertEqual([row["id"] for row in results], ["target"])
 
+    def test_fuzzy_search_recovers_german_typo_and_remains_separate(self):
+        self.store.upsert_file(
+            "sessions/mat.md", "digest",
+            [("mat", "Telegram", "fyssmatte X3 fahrerseite hinten", 4)],
+        )
+        rows = self.store.search_fuzzy("die fussmatte X3", limit=5)
+        self.assertEqual([row["path"] for row in rows], ["sessions/mat.md"])
+        self.assertTrue(rows[0]["fuzzy_match"])
+        lexical = self.store.search("die fussmatte X3")
+        self.assertEqual([row["path"] for row in lexical], ["sessions/mat.md"])
+        self.assertLess(lexical[0]["score"], 0.01)  # only the exact X3 token matched
+        self.store.delete_file("sessions/mat.md")
+        self.assertEqual(self.store.search_fuzzy("die fussmatte X3"), [])
+
+    def test_fuzzy_index_can_be_disabled_for_large_document_corpus(self):
+        store = SQLiteStore(enable_fuzzy=False)
+        try:
+            store.upsert_file(
+                "doc.md", "digest", [("doc", "Manual", "fyssmatte replacement", 1)]
+            )
+            self.assertEqual(store.search_fuzzy("fussmatte"), [])
+            tables = {
+                row[0]
+                for row in store.db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertNotIn("chunks_trigram", tables)
+        finally:
+            store.close()
+
     def test_index_status_records_freshness_and_errors(self):
         file = self.root / "a.md"
         file.write_text("# Topic\nhello world")

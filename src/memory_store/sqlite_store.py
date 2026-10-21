@@ -21,8 +21,10 @@ class SQLiteStore:
         path: str | Path = ":memory:",
         dimensions: int = 128,
         read_timeout: float | None = None,
+        enable_fuzzy: bool = True,
     ):
         self.path = str(path)
+        self.enable_fuzzy = enable_fuzzy
         # Upper bound on how long a search waits for a file lock held by a
         # long-running writer before failing fast with ``OperationalError``.
         self.read_timeout = _default_read_timeout() if read_timeout is None else read_timeout
@@ -45,6 +47,17 @@ class SQLiteStore:
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(id UNINDEXED, path, heading, body);
         CREATE TABLE IF NOT EXISTS index_metadata(key TEXT PRIMARY KEY, value TEXT);
         """)
+        if self.enable_fuzzy:
+            self.db.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_trigram USING fts5("
+                "id UNINDEXED, path, heading, body, tokenize='trigram')"
+            )
+            # Backfill databases created before this index existed.
+            self.db.execute(
+                "INSERT INTO chunks_trigram (id, path, heading, body) "
+                "SELECT c.id, c.path, c.heading, c.body FROM chunks c "
+                "WHERE NOT EXISTS (SELECT 1 FROM chunks_trigram t WHERE t.id=c.id)"
+            )
         self.db.commit()
 
     @property
@@ -87,6 +100,11 @@ class SQLiteStore:
                 self.db.execute(
                     "INSERT INTO chunks_fts VALUES (?,?,?,?)", (chunk_id, path, heading, body)
                 )
+                if self.enable_fuzzy:
+                    self.db.execute(
+                        "INSERT INTO chunks_trigram VALUES (?,?,?,?)",
+                        (chunk_id, path, heading, body),
+                    )
 
     def upsert_file_precomputed(self, path, digest, chunks):
         """Atomically replace a file using already-computed vectors.
@@ -111,6 +129,11 @@ class SQLiteStore:
                     "INSERT INTO chunks_fts VALUES (?,?,?,?)",
                     (chunk_id, path, heading, body),
                 )
+                if self.enable_fuzzy:
+                    self.db.execute(
+                        "INSERT INTO chunks_trigram VALUES (?,?,?,?)",
+                        (chunk_id, path, heading, body),
+                    )
 
     def _delete_file_no_commit(self, path):
         """Delete *path*'s rows; the caller owns the surrounding transaction."""
@@ -119,6 +142,8 @@ class SQLiteStore:
         self.db.execute("DELETE FROM chunks WHERE path=?", (path,))
         for item in ids:
             self.db.execute("DELETE FROM chunks_fts WHERE id=?", (item,))
+            if self.enable_fuzzy:
+                self.db.execute("DELETE FROM chunks_trigram WHERE id=?", (item,))
 
     def chunk_ids(self, path):
         return [row[0] for row in self.db.execute("SELECT id FROM chunks WHERE path=?", (path,))]
@@ -207,6 +232,60 @@ class SQLiteStore:
 
     def close(self):
         self.db.close()
+
+    def search_fuzzy(self, query, limit=20, min_similarity=0.72):
+        """Return typo-tolerant candidates for distinctive query tokens.
+
+        FTS5's trigram index narrows the corpus; edit similarity is then checked
+        against individual words so common character fragments alone cannot
+        make a candidate relevant. This is deliberately separate from ordinary
+        lexical evidence.
+        """
+        if not self.enable_fuzzy:
+            return []
+        import difflib
+        import re
+
+        tokens = sorted(
+            {t.casefold() for t in re.findall(r"[\w-]+", query) if 5 <= len(t) <= 64},
+            key=len,
+            reverse=True,
+        )[:6]
+        if not tokens:
+            return []
+        trigrams = sorted({token[i:i + 3] for token in tokens for i in range(len(token) - 2)})
+        match = " OR ".join('"' + tri.replace('"', '""') + '"' for tri in trigrams)
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT c.* FROM chunks_trigram t JOIN chunks c ON c.id=t.id "
+                "WHERE chunks_trigram MATCH ? ORDER BY bm25(chunks_trigram) LIMIT ?",
+                (match, max(limit * 20, 200)),
+            ).fetchall()
+        results = []
+        for row in rows:
+            words = re.findall(r"[\w-]+", f"{row['heading'] or ''} {row['body']} {row['path']}")
+            best = max(
+                (
+                    difflib.SequenceMatcher(None, token, word.casefold()).ratio()
+                    for token in tokens
+                    for word in words
+                    if len(word) >= 5
+                ),
+                default=0.0,
+            )
+            if best >= min_similarity:
+                results.append(
+                    {
+                        "id": row["id"],
+                        "path": row["path"],
+                        "heading": row["heading"],
+                        "text": row["body"],
+                        "line": row["line"],
+                        "score": best,
+                        "fuzzy_match": True,
+                    }
+                )
+        return sorted(results, key=lambda item: item["score"], reverse=True)[:limit]
 
     def vector(self, chunk_id):
         row = self.db.execute("SELECT vector FROM chunks WHERE id=?", (chunk_id,)).fetchone()
