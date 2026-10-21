@@ -118,6 +118,71 @@ class ApiTests(unittest.TestCase):
     def test_vector_status_without_vector_store_returns_none(self):
         self.assertIsNone(server.vector_status(server.store, None, bounded=True))
 
+    def test_hybrid_search_surfaces_typo_candidate_with_weak_lexical_match(self):
+        from memory_store.sqlite_store import SQLiteStore
+
+        selected = SQLiteStore()
+        try:
+            selected.upsert_file(
+                "sessions/mat.md",
+                "digest",
+                [("mat", "Telegram", "fyssmatte X3 fahrerseite hinten", 4)],
+            )
+            results = server.hybrid_search("die fussmatte X3", 3, selected, None)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["path"], "sessions/mat.md")
+            self.assertTrue(results[0]["fuzzy_match"])
+            # FTS finds only the exact X3 token; fuzzy score adds separate
+            # retrieval evidence without pretending the misspelled word matched.
+            self.assertLess(results[0]["lexical_evidence"], 0.01)
+            self.assertGreater(results[0]["fuzzy_score"], 0)
+            self.assertLessEqual(results[0]["fuzzy_score"], 1 / 61)
+        finally:
+            selected.close()
+
+    def test_hybrid_search_typo_target_ranks_first_and_overlaps_stay_out(self):
+        from memory_store.sqlite_store import SQLiteStore
+
+        selected = SQLiteStore()
+        try:
+            for path, text in [
+                ("yoga.md", "Matte Yoga Training Fitness"),
+                ("bmw.md", "BMW X3 elektrische Heckklappe Ladekante"),
+                ("mat.md", "fyssmatte X3 fahrerseite hinten"),
+            ]:
+                selected.upsert_file(path, "digest", [(path, "H", text, 1)])
+            results = server.hybrid_search("die fussmatte X3", 3, selected, None)
+            self.assertEqual(results[0]["path"], "mat.md")
+            self.assertTrue(results[0]["fuzzy_match"])
+            by_path = {r["path"]: r for r in results}
+            self.assertNotIn("yoga.md", by_path)
+            self.assertFalse(by_path.get("bmw.md", {}).get("fuzzy_match", False))
+            # A fuzzy-only hit must not count as lexical evidence.
+            only = server.hybrid_search("fussmatte", 3, selected, None)
+            self.assertEqual([r["path"] for r in only], ["mat.md"])
+            self.assertEqual(only[0]["lexical_evidence"], 0)
+        finally:
+            selected.close()
+
+    def test_fuzzy_candidates_cannot_outrank_lexical_hits(self):
+        from memory_store.sqlite_store import SQLiteStore
+
+        selected = SQLiteStore()
+        try:
+            selected.upsert_file(
+                "exact.md", "d", [("exact", "H", "fussmatte X3 exakte Treffer", 1)]
+            )
+            for i in range(30):
+                selected.upsert_file(
+                    f"typo{i}.md", "d", [(f"t{i}", "H", f"fyssmatte Notiz {i}", 1)]
+                )
+            results = server.hybrid_search("fussmatte X3", 5, selected, None)
+            self.assertEqual(results[0]["path"], "exact.md")
+            self.assertFalse(results[0].get("fuzzy_match", False))
+            self.assertTrue(all(r.get("fuzzy_score", 0) <= 1 / 61 for r in results))
+        finally:
+            selected.close()
+
     def test_search_labels_output_registry_as_artifact(self):
         original = server.store.search
         try:

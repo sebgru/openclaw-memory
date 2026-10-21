@@ -15,14 +15,61 @@ def _default_read_timeout() -> float:
         return 2.0
 
 
+FUZZY_MAX_CANDIDATES = 20
+FUZZY_MAX_TOKENS = 4
+FUZZY_SCAN_LIMIT = 200
+
+
+def _fold(text):
+    """Casefold and strip diacritics (ß -> ss) for typo comparison."""
+    import unicodedata
+
+    text = text.casefold().replace("ß", "ss")
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
+
+
+def _is_typo_variant(token, word):
+    """True when *word* is a one-edit typo of the already folded *token*.
+
+    A word that only differs by folding (ß/ss, umlauts) also counts. The edit
+    must be interior: one leading character and two trailing characters have to
+    match, which rejects German inflections (Rechnung/Rechnungen, Projekt/
+    Projekte, Termin/Termine, Strom/Stroms, kauft/kaufe) while accepting
+    fussmatte/fyssmatte. Exact (raw) matches are lexical evidence, not typos.
+    """
+    if word.lower() == token:
+        return False
+    word = _fold(word)
+    if word == token:
+        return True
+    if abs(len(word) - len(token)) > 1:
+        return False
+    prefix = 0
+    limit = min(len(word), len(token))
+    while prefix < limit and word[prefix] == token[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < limit - prefix and word[-1 - suffix] == token[-1 - suffix]:
+        suffix += 1
+    if prefix < 1 or suffix < 2:
+        return False
+    mid_w = word[prefix : len(word) - suffix]
+    mid_t = token[prefix : len(token) - suffix]
+    if len(mid_w) <= 1 and len(mid_t) <= 1:
+        return True  # substitution, insertion or deletion
+    return len(mid_w) == len(mid_t) == 2 and mid_w == mid_t[::-1]  # transposition
+
+
 class SQLiteStore:
     def __init__(
         self,
         path: str | Path = ":memory:",
         dimensions: int = 128,
         read_timeout: float | None = None,
+        enable_fuzzy: bool = True,
     ):
         self.path = str(path)
+        self.enable_fuzzy = enable_fuzzy
         # Upper bound on how long a search waits for a file lock held by a
         # long-running writer before failing fast with ``OperationalError``.
         self.read_timeout = _default_read_timeout() if read_timeout is None else read_timeout
@@ -45,7 +92,32 @@ class SQLiteStore:
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(id UNINDEXED, path, heading, body);
         CREATE TABLE IF NOT EXISTS index_metadata(key TEXT PRIMARY KEY, value TEXT);
         """)
+        if self.enable_fuzzy:
+            self._ensure_trigram_index()
         self.db.commit()
+
+    def _ensure_trigram_index(self):
+        """Create and one-time backfill the trigram index.
+
+        ``chunks_trigram.id`` is UNINDEXED, so a per-row ``NOT EXISTS`` probe
+        would scan the whole FTS table for every chunk (O(n^2)). Instead a
+        marker row, written in the same transaction as the bulk copy, makes the
+        migration atomic and idempotent: startup after the first one is O(1).
+        """
+        with self._write_lock, self.db:
+            self.db.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_trigram USING fts5("
+                "id UNINDEXED, path, heading, body, tokenize='trigram')"
+            )
+            self.db.execute("CREATE TABLE IF NOT EXISTS trigram_state(key TEXT PRIMARY KEY)")
+            if self.db.execute("SELECT 1 FROM trigram_state WHERE key='backfilled'").fetchone():
+                return
+            self.db.execute("DELETE FROM chunks_trigram")
+            self.db.execute(
+                "INSERT INTO chunks_trigram (id, path, heading, body) "
+                "SELECT id, path, heading, body FROM chunks"
+            )
+            self.db.execute("INSERT INTO trigram_state VALUES ('backfilled')")
 
     @property
     def write_lock(self):
@@ -87,6 +159,11 @@ class SQLiteStore:
                 self.db.execute(
                     "INSERT INTO chunks_fts VALUES (?,?,?,?)", (chunk_id, path, heading, body)
                 )
+                if self.enable_fuzzy:
+                    self.db.execute(
+                        "INSERT INTO chunks_trigram VALUES (?,?,?,?)",
+                        (chunk_id, path, heading, body),
+                    )
 
     def upsert_file_precomputed(self, path, digest, chunks):
         """Atomically replace a file using already-computed vectors.
@@ -111,6 +188,11 @@ class SQLiteStore:
                     "INSERT INTO chunks_fts VALUES (?,?,?,?)",
                     (chunk_id, path, heading, body),
                 )
+                if self.enable_fuzzy:
+                    self.db.execute(
+                        "INSERT INTO chunks_trigram VALUES (?,?,?,?)",
+                        (chunk_id, path, heading, body),
+                    )
 
     def _delete_file_no_commit(self, path):
         """Delete *path*'s rows; the caller owns the surrounding transaction."""
@@ -119,6 +201,8 @@ class SQLiteStore:
         self.db.execute("DELETE FROM chunks WHERE path=?", (path,))
         for item in ids:
             self.db.execute("DELETE FROM chunks_fts WHERE id=?", (item,))
+            if self.enable_fuzzy:
+                self.db.execute("DELETE FROM chunks_trigram WHERE id=?", (item,))
 
     def chunk_ids(self, path):
         return [row[0] for row in self.db.execute("SELECT id FROM chunks WHERE path=?", (path,))]
@@ -207,6 +291,60 @@ class SQLiteStore:
 
     def close(self):
         self.db.close()
+
+    def search_fuzzy(self, query, limit=20):
+        """Return typo-tolerant candidates for distinctive query tokens.
+
+        FTS5's trigram index narrows the corpus; each candidate word is then
+        checked with ``_is_typo_variant`` (single edit, not an inflection).
+        Candidates are bounded by ``FUZZY_MAX_CANDIDATES`` regardless of the
+        caller's limit and returned best-first; ``score`` is only a stable
+        ordering key, not lexical evidence.
+        """
+        if not self.enable_fuzzy:
+            return []
+        import re
+
+        limit = min(limit, FUZZY_MAX_CANDIDATES)
+        tokens = sorted(
+            {_fold(t) for t in re.findall(r"[\w-]+", query) if 5 <= len(t) <= 64},
+            key=len,
+            reverse=True,
+        )[:FUZZY_MAX_TOKENS]
+        if not tokens:
+            return []
+        trigrams = sorted({token[i : i + 3] for token in tokens for i in range(len(token) - 2)})
+        match = " OR ".join('"' + tri.replace('"', '""') + '"' for tri in trigrams)
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT c.* FROM chunks_trigram t JOIN chunks c ON c.id=t.id "
+                "WHERE chunks_trigram MATCH ? ORDER BY bm25(chunks_trigram) LIMIT ?",
+                (match, FUZZY_SCAN_LIMIT),
+            ).fetchall()
+        results: list[dict] = []
+        for row in rows:
+            words = re.findall(r"[\w-]+", f"{row['heading'] or ''} {row['body']} {row['path']}")
+            hit = any(
+                _is_typo_variant(token, word)
+                for token in tokens
+                for word in words
+                if len(word) >= 5
+            )
+            if hit:
+                results.append(
+                    {
+                        "id": row["id"],
+                        "path": row["path"],
+                        "heading": row["heading"],
+                        "text": row["body"],
+                        "line": row["line"],
+                        "score": 1.0 - len(results) / (FUZZY_SCAN_LIMIT + 1),
+                        "fuzzy_match": True,
+                    }
+                )
+                if len(results) >= limit:
+                    break
+        return results
 
     def vector(self, chunk_id):
         row = self.db.execute("SELECT vector FROM chunks WHERE id=?", (chunk_id,)).fetchone()

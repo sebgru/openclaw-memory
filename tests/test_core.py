@@ -46,6 +46,179 @@ class CoreTests(unittest.TestCase):
         results = self.store.search_exact("Denon AVR-X1700HDAB", limit=500)
         self.assertEqual([row["id"] for row in results], ["target"])
 
+    def test_fuzzy_search_recovers_german_typo_and_remains_separate(self):
+        self.store.upsert_file(
+            "sessions/mat.md",
+            "digest",
+            [("mat", "Telegram", "fyssmatte X3 fahrerseite hinten", 4)],
+        )
+        rows = self.store.search_fuzzy("die fussmatte X3", limit=5)
+        self.assertEqual([row["path"] for row in rows], ["sessions/mat.md"])
+        self.assertTrue(rows[0]["fuzzy_match"])
+        lexical = self.store.search("die fussmatte X3")
+        self.assertEqual([row["path"] for row in lexical], ["sessions/mat.md"])
+        self.assertLess(lexical[0]["score"], 0.01)  # only the exact X3 token matched
+        self.store.delete_file("sessions/mat.md")
+        self.assertEqual(self.store.search_fuzzy("die fussmatte X3"), [])
+
+    def test_fuzzy_search_negative_controls(self):
+        for path, text in [
+            ("steuer.md", "Steuererklaerung Abgabe Finanzamt"),
+            ("yoga.md", "Matte Yoga Training Fitness"),
+            ("bmw.md", "BMW X3 elektrische Heckklappe"),
+        ]:
+            self.store.upsert_file(path, "digest", [(path, "H", text, 1)])
+        # Unrelated query, exact-word hit, and a merely similar-looking word
+        # must not produce fuzzy candidates.
+        self.assertEqual(self.store.search_fuzzy("weather forecast tomorrow"), [])
+        self.assertEqual(self.store.search_fuzzy("Steuererklaerung Abgabe"), [])
+        self.assertEqual(self.store.search_fuzzy("Matratze kaufen"), [])
+
+    def test_fuzzy_bmw_and_matte_negatives_do_not_match_target_query(self):
+        for path, text in [
+            ("yoga.md", "Matte Yoga Training Fitness"),
+            ("bmw.md", "BMW X3 elektrische Heckklappe Ladekante"),
+            ("mat.md", "fyssmatte X3 fahrerseite hinten"),
+        ]:
+            self.store.upsert_file(path, "digest", [(path, "H", text, 1)])
+        rows = self.store.search_fuzzy("die fussmatte X3", limit=5)
+        self.assertEqual([row["path"] for row in rows], ["mat.md"])
+        self.assertEqual(self.store.search_fuzzy("Matratze kaufen"), [])
+
+    def test_fuzzy_index_stays_consistent_on_upsert_replace_and_delete(self):
+        def trigram_ids():
+            return {r[0] for r in self.store.db.execute("SELECT id FROM chunks_trigram")}
+
+        self.store.upsert_file("a.md", "d1", [("a1", "H", "fyssmatte alt", 1)])
+        self.store.upsert_file("a.md", "d2", [("a2", "H", "Heckklappe neu", 1)])
+        self.assertEqual(trigram_ids(), {"a2"})
+        self.assertEqual(self.store.search_fuzzy("fussmatte"), [])
+        self.store.upsert_file_precomputed("b.md", "d3", [("b1", "H", "fyssmatte b", 1, [0.0])])
+        self.assertEqual(trigram_ids(), {"a2", "b1"})
+        self.store.upsert_file_precomputed("b.md", "d4", [("b2", "H", "Heckklappe", 1, [0.0])])
+        self.assertEqual(trigram_ids(), {"a2", "b2"})
+        self.store.delete_file("a.md")
+        self.store.delete_file("b.md")
+        self.assertEqual(trigram_ids(), set())
+
+    def test_fuzzy_index_backfills_existing_database(self):
+        path = self.root / "legacy.db"
+        legacy = SQLiteStore(path, enable_fuzzy=False)
+        legacy.upsert_file("mat.md", "d", [("m", "H", "fyssmatte X3", 1)])
+        legacy.close()
+        upgraded = SQLiteStore(path)
+        rows = upgraded.search_fuzzy("fussmatte")
+        self.assertEqual([r["path"] for r in rows], ["mat.md"])
+        upgraded.close()
+        reopened = SQLiteStore(path)  # backfill must be idempotent
+        try:
+            count = reopened.db.execute("SELECT COUNT(*) FROM chunks_trigram").fetchone()[0]
+            self.assertEqual(count, 1)
+        finally:
+            reopened.close()
+
+    def test_fuzzy_rejects_german_inflections_but_accepts_typos(self):
+        from memory_store.sqlite_store import _fold, _is_typo_variant
+
+        for token, word in [
+            ("rechnung", "Rechnungen"),
+            ("projekt", "Projekte"),
+            ("termin", "Termine"),
+            ("strom", "Stroms"),
+            ("kauft", "kaufe"),
+            ("matratze", "Matte"),
+            ("fussmatte", "Matte"),
+            ("fussmatte", "Autofussmatten"),
+        ]:
+            self.assertFalse(_is_typo_variant(_fold(token), word), (token, word))
+        for token, word in [
+            ("fussmatte", "fyssmatte"),
+            ("fussmatte", "Fußmatte"),
+            ("fussmatte", "fusmatte"),
+            ("fussmatte", "fussmtate"),
+            ("rechnung", "rechmung"),
+            ("heckklappe", "Hecklappe"),
+        ]:
+            self.assertTrue(_is_typo_variant(_fold(token), word), (token, word))
+        # Raw exact hits are lexical evidence, not typos.
+        self.assertFalse(_is_typo_variant("fussmatte", "Fussmatte"))
+
+    def test_fuzzy_inflection_noise_does_not_crowd_target(self):
+        for i in range(60):
+            self.store.upsert_file(
+                f"n{i}.md", "d", [(f"n{i}", "H", f"Rechnungen Projekte Termine {i}", 1)]
+            )
+        self.store.upsert_file("mat.md", "d", [("m", "H", "fyssmatte Rechnung", 1)])
+        rows = self.store.search_fuzzy("fussmatte Rechnung Projekt Termin")
+        self.assertEqual([r["path"] for r in rows], ["mat.md"])
+
+    def test_fuzzy_candidates_bounded_regardless_of_limit(self):
+        for i in range(60):
+            self.store.upsert_file(f"t{i}.md", "d", [(f"t{i}", "H", f"fyssmatte {i}", 1)])
+        self.assertLessEqual(len(self.store.search_fuzzy("fussmatte", limit=10000)), 20)
+
+    def test_trigram_backfill_runs_once_and_is_idempotent(self):
+        path = self.root / "mig.db"
+        legacy = SQLiteStore(path, enable_fuzzy=False)
+        for i in range(5):
+            legacy.upsert_file(f"f{i}.md", "d", [(f"c{i}", "H", f"fyssmatte {i}", 1)])
+        legacy.close()
+
+        first = SQLiteStore(path)
+        n = first.db.execute("SELECT COUNT(*) FROM chunks_trigram").fetchone()[0]
+        self.assertEqual(n, 5)
+        self.assertEqual(first.db.execute("SELECT COUNT(*) FROM trigram_state").fetchone()[0], 1)
+        first.close()
+
+        statements = []
+        second = SQLiteStore.__new__(SQLiteStore)
+        import sqlite3
+
+        real_connect = sqlite3.connect
+
+        def traced(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        sqlite3.connect = traced
+        try:
+            SQLiteStore.__init__(second, path)
+        finally:
+            sqlite3.connect = real_connect
+        try:
+            self.assertFalse(
+                any(
+                    "INSERT INTO chunks_trigram" in s or "DELETE FROM chunks_trigram" in s
+                    for s in statements
+                ),
+                statements,
+            )
+            self.assertEqual(
+                second.db.execute("SELECT COUNT(*) FROM chunks_trigram").fetchone()[0], 5
+            )
+        finally:
+            second.close()
+
+    def test_fuzzy_index_can_be_disabled_for_large_document_corpus(self):
+        store = SQLiteStore(enable_fuzzy=False)
+        try:
+            store.upsert_file("doc.md", "digest", [("doc", "Manual", "fyssmatte replacement", 1)])
+            # Precomputed writes and deletes must skip the trigram table too.
+            store.upsert_file_precomputed(
+                "doc.md", "digest2", [("doc2", "Manual", "fyssmatte replacement v2", 1, [0.0])]
+            )
+            store.delete_file("doc.md")
+            self.assertEqual(store.search("replacement"), [])
+            self.assertEqual(store.search_fuzzy("fussmatte"), [])
+            tables = {
+                row[0]
+                for row in store.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            self.assertNotIn("chunks_trigram", tables)
+        finally:
+            store.close()
+
     def test_index_status_records_freshness_and_errors(self):
         file = self.root / "a.md"
         file.write_text("# Topic\nhello world")

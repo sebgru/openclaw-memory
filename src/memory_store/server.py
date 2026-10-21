@@ -73,7 +73,9 @@ archive_vector_store = (
     else None
 )
 documents_store = (
-    SQLiteStore(os.getenv("DOCUMENTS_SQLITE_PATH", "documents.db"), DIM) if DOCUMENTS_ROOT else None
+    SQLiteStore(os.getenv("DOCUMENTS_SQLITE_PATH", "documents.db"), DIM, enable_fuzzy=False)
+    if DOCUMENTS_ROOT
+    else None
 )
 documents_vector_store = (
     QdrantStore(
@@ -110,6 +112,9 @@ MIN_TERM_LENGTH = 3
 FULL_COVERAGE_BOOST = env_float("FULL_COVERAGE_BOOST", 1.0)
 # A result set with no lexical evidence and no semantic similarity at or above
 # this floor is reported as low confidence (probably nothing relevant exists).
+# Typo-tolerant candidates contribute a bounded rank score (<= one lexical rank).
+FUZZY_RANK_WEIGHT = min(1.0, env_float("FUZZY_RANK_WEIGHT", 0.5))
+FUZZY_MAX_CANDIDATES = env_int("FUZZY_MAX_CANDIDATES", 20)
 LOW_CONFIDENCE_SEMANTIC_FLOOR = env_float("LOW_CONFIDENCE_SEMANTIC_FLOOR", 0.6)
 PROMPT_SOURCE_QUOTAS = {
     "memory": env_int("PROMPT_MEMORY_QUOTA", 3),
@@ -132,6 +137,11 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         vector_store if selected_vector_store is _DEFAULT_VECTOR else selected_vector_store
     )
     lexical = selected_store.search(query, limit * 3)
+    fuzzy = (
+        selected_store.search_fuzzy(query, min(limit * 3, FUZZY_MAX_CANDIDATES))
+        if hasattr(selected_store, "search_fuzzy")
+        else []
+    )
     if hasattr(selected_store, "search_exact"):
         exact_candidates = selected_store.search_exact(query, min(limit * 2, 100))
         by_id = {row["id"]: row for row in lexical}
@@ -168,6 +178,30 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         item["score"] += score
         item["lexical_score"] += score
         item["lexical_evidence"] = max(item["lexical_evidence"], row.get("score", 0))
+    # Typo-tolerant candidates are kept distinct from true lexical evidence:
+    # they can improve recall/ranking but must not silently turn a weak match
+    # into a confident one.
+    for rank, row in enumerate(fuzzy):
+        # Rank-based, same scale as the lexical/semantic contributions, so a
+        # typo candidate can never outweigh an exact or lexical match.
+        fuzzy_rank_score = FUZZY_RANK_WEIGHT / (60 + rank + 1)
+        item = merged.setdefault(
+            point_id(row["id"]),
+            {
+                **row,
+                "score": 0,
+                "lexical_score": 0,
+                "semantic_score": 0,
+                "lexical_evidence": 0,
+                "semantic_similarity": 0,
+                "fuzzy_match": True,
+                "fuzzy_score": fuzzy_rank_score,
+            },
+        )
+        if not item.get("fuzzy_match"):
+            item["fuzzy_match"] = True
+            item["fuzzy_score"] = fuzzy_rank_score
+        item["score"] += fuzzy_rank_score
     for rank, row in enumerate(semantic):
         score = 1 / (60 + rank + 1)
         item = merged.setdefault(
