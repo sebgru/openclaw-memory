@@ -204,6 +204,12 @@ class CoreTests(unittest.TestCase):
         store = SQLiteStore(enable_fuzzy=False)
         try:
             store.upsert_file("doc.md", "digest", [("doc", "Manual", "fyssmatte replacement", 1)])
+            # Precomputed writes and deletes must skip the trigram table too.
+            store.upsert_file_precomputed(
+                "doc.md", "digest2", [("doc2", "Manual", "fyssmatte replacement v2", 1, [0.0])]
+            )
+            store.delete_file("doc.md")
+            self.assertEqual(store.search("replacement"), [])
             self.assertEqual(store.search_fuzzy("fussmatte"), [])
             tables = {
                 row[0]
