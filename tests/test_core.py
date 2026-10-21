@@ -116,6 +116,81 @@ class CoreTests(unittest.TestCase):
         finally:
             reopened.close()
 
+    def test_fuzzy_rejects_german_inflections_but_accepts_typos(self):
+        from memory_store.sqlite_store import _fold, _is_typo_variant
+
+        for token, word in [
+            ("rechnung", "Rechnungen"), ("projekt", "Projekte"), ("termin", "Termine"),
+            ("strom", "Stroms"), ("kauft", "kaufe"), ("matratze", "Matte"),
+            ("fussmatte", "Matte"), ("fussmatte", "Autofussmatten"),
+        ]:
+            self.assertFalse(_is_typo_variant(_fold(token), word), (token, word))
+        for token, word in [
+            ("fussmatte", "fyssmatte"), ("fussmatte", "Fußmatte"),
+            ("fussmatte", "fusmatte"), ("fussmatte", "fussmtate"),
+            ("rechnung", "rechmung"), ("heckklappe", "Heckklape"),
+        ]:
+            self.assertTrue(_is_typo_variant(_fold(token), word), (token, word))
+        # Raw exact hits are lexical evidence, not typos.
+        self.assertFalse(_is_typo_variant("fussmatte", "Fussmatte"))
+
+    def test_fuzzy_inflection_noise_does_not_crowd_target(self):
+        for i in range(60):
+            self.store.upsert_file(
+                f"n{i}.md", "d", [(f"n{i}", "H", f"Rechnungen Projekte Termine {i}", 1)]
+            )
+        self.store.upsert_file("mat.md", "d", [("m", "H", "fyssmatte Rechnung", 1)])
+        rows = self.store.search_fuzzy("fussmatte Rechnung Projekt Termin")
+        self.assertEqual([r["path"] for r in rows], ["mat.md"])
+
+    def test_fuzzy_candidates_bounded_regardless_of_limit(self):
+        for i in range(60):
+            self.store.upsert_file(f"t{i}.md", "d", [(f"t{i}", "H", f"fyssmatte {i}", 1)])
+        self.assertLessEqual(len(self.store.search_fuzzy("fussmatte", limit=10000)), 20)
+
+    def test_trigram_backfill_runs_once_and_is_idempotent(self):
+        path = self.root / "mig.db"
+        legacy = SQLiteStore(path, enable_fuzzy=False)
+        for i in range(5):
+            legacy.upsert_file(f"f{i}.md", "d", [(f"c{i}", "H", f"fyssmatte {i}", 1)])
+        legacy.close()
+
+        first = SQLiteStore(path)
+        n = first.db.execute("SELECT COUNT(*) FROM chunks_trigram").fetchone()[0]
+        self.assertEqual(n, 5)
+        self.assertEqual(
+            first.db.execute("SELECT COUNT(*) FROM trigram_state").fetchone()[0], 1
+        )
+        first.close()
+
+        statements = []
+        second = SQLiteStore.__new__(SQLiteStore)
+        import sqlite3
+
+        real_connect = sqlite3.connect
+
+        def traced(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        sqlite3.connect = traced
+        try:
+            SQLiteStore.__init__(second, path)
+        finally:
+            sqlite3.connect = real_connect
+        try:
+            self.assertFalse(
+                any("INSERT INTO chunks_trigram" in s or "DELETE FROM chunks_trigram" in s
+                    for s in statements),
+                statements,
+            )
+            self.assertEqual(
+                second.db.execute("SELECT COUNT(*) FROM chunks_trigram").fetchone()[0], 5
+            )
+        finally:
+            second.close()
+
     def test_fuzzy_index_can_be_disabled_for_large_document_corpus(self):
         store = SQLiteStore(enable_fuzzy=False)
         try:

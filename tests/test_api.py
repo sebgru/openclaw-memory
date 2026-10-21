@@ -134,7 +134,8 @@ class ApiTests(unittest.TestCase):
             # FTS finds only the exact X3 token; fuzzy score adds separate
             # retrieval evidence without pretending the misspelled word matched.
             self.assertLess(results[0]["lexical_evidence"], 0.01)
-            self.assertGreater(results[0]["fuzzy_score"], 0.8)
+            self.assertGreater(results[0]["fuzzy_score"], 0)
+            self.assertLessEqual(results[0]["fuzzy_score"], 1 / 61)
         finally:
             selected.close()
 
@@ -159,6 +160,25 @@ class ApiTests(unittest.TestCase):
             only = server.hybrid_search("fussmatte", 3, selected, None)
             self.assertEqual([r["path"] for r in only], ["mat.md"])
             self.assertEqual(only[0]["lexical_evidence"], 0)
+        finally:
+            selected.close()
+
+    def test_fuzzy_candidates_cannot_outrank_lexical_hits(self):
+        from memory_store.sqlite_store import SQLiteStore
+
+        selected = SQLiteStore()
+        try:
+            selected.upsert_file(
+                "exact.md", "d", [("exact", "H", "fussmatte X3 exakte Treffer", 1)]
+            )
+            for i in range(30):
+                selected.upsert_file(
+                    f"typo{i}.md", "d", [(f"t{i}", "H", f"fyssmatte Notiz {i}", 1)]
+                )
+            results = server.hybrid_search("fussmatte X3", 5, selected, None)
+            self.assertEqual(results[0]["path"], "exact.md")
+            self.assertFalse(results[0].get("fuzzy_match", False))
+            self.assertTrue(all(r.get("fuzzy_score", 0) <= 1 / 61 for r in results))
         finally:
             selected.close()
 
