@@ -124,7 +124,8 @@ class ApiTests(unittest.TestCase):
         selected = SQLiteStore()
         try:
             selected.upsert_file(
-                "sessions/mat.md", "digest",
+                "sessions/mat.md",
+                "digest",
                 [("mat", "Telegram", "fyssmatte X3 fahrerseite hinten", 4)],
             )
             results = server.hybrid_search("die fussmatte X3", 3, selected, None)

@@ -48,7 +48,8 @@ class CoreTests(unittest.TestCase):
 
     def test_fuzzy_search_recovers_german_typo_and_remains_separate(self):
         self.store.upsert_file(
-            "sessions/mat.md", "digest",
+            "sessions/mat.md",
+            "digest",
             [("mat", "Telegram", "fyssmatte X3 fahrerseite hinten", 4)],
         )
         rows = self.store.search_fuzzy("die fussmatte X3", limit=5)
@@ -120,15 +121,23 @@ class CoreTests(unittest.TestCase):
         from memory_store.sqlite_store import _fold, _is_typo_variant
 
         for token, word in [
-            ("rechnung", "Rechnungen"), ("projekt", "Projekte"), ("termin", "Termine"),
-            ("strom", "Stroms"), ("kauft", "kaufe"), ("matratze", "Matte"),
-            ("fussmatte", "Matte"), ("fussmatte", "Autofussmatten"),
+            ("rechnung", "Rechnungen"),
+            ("projekt", "Projekte"),
+            ("termin", "Termine"),
+            ("strom", "Stroms"),
+            ("kauft", "kaufe"),
+            ("matratze", "Matte"),
+            ("fussmatte", "Matte"),
+            ("fussmatte", "Autofussmatten"),
         ]:
             self.assertFalse(_is_typo_variant(_fold(token), word), (token, word))
         for token, word in [
-            ("fussmatte", "fyssmatte"), ("fussmatte", "Fußmatte"),
-            ("fussmatte", "fusmatte"), ("fussmatte", "fussmtate"),
-            ("rechnung", "rechmung"), ("heckklappe", "Hecklappe"),
+            ("fussmatte", "fyssmatte"),
+            ("fussmatte", "Fußmatte"),
+            ("fussmatte", "fusmatte"),
+            ("fussmatte", "fussmtate"),
+            ("rechnung", "rechmung"),
+            ("heckklappe", "Hecklappe"),
         ]:
             self.assertTrue(_is_typo_variant(_fold(token), word), (token, word))
         # Raw exact hits are lexical evidence, not typos.
@@ -158,9 +167,7 @@ class CoreTests(unittest.TestCase):
         first = SQLiteStore(path)
         n = first.db.execute("SELECT COUNT(*) FROM chunks_trigram").fetchone()[0]
         self.assertEqual(n, 5)
-        self.assertEqual(
-            first.db.execute("SELECT COUNT(*) FROM trigram_state").fetchone()[0], 1
-        )
+        self.assertEqual(first.db.execute("SELECT COUNT(*) FROM trigram_state").fetchone()[0], 1)
         first.close()
 
         statements = []
@@ -181,8 +188,10 @@ class CoreTests(unittest.TestCase):
             sqlite3.connect = real_connect
         try:
             self.assertFalse(
-                any("INSERT INTO chunks_trigram" in s or "DELETE FROM chunks_trigram" in s
-                    for s in statements),
+                any(
+                    "INSERT INTO chunks_trigram" in s or "DELETE FROM chunks_trigram" in s
+                    for s in statements
+                ),
                 statements,
             )
             self.assertEqual(
@@ -194,15 +203,11 @@ class CoreTests(unittest.TestCase):
     def test_fuzzy_index_can_be_disabled_for_large_document_corpus(self):
         store = SQLiteStore(enable_fuzzy=False)
         try:
-            store.upsert_file(
-                "doc.md", "digest", [("doc", "Manual", "fyssmatte replacement", 1)]
-            )
+            store.upsert_file("doc.md", "digest", [("doc", "Manual", "fyssmatte replacement", 1)])
             self.assertEqual(store.search_fuzzy("fussmatte"), [])
             tables = {
                 row[0]
-                for row in store.db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
+                for row in store.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
             self.assertNotIn("chunks_trigram", tables)
         finally:

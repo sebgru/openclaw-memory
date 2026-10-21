@@ -15,7 +15,6 @@ def _default_read_timeout() -> float:
         return 2.0
 
 
-
 FUZZY_MAX_CANDIDATES = 20
 FUZZY_MAX_TOKENS = 4
 FUZZY_SCAN_LIMIT = 200
@@ -54,8 +53,8 @@ def _is_typo_variant(token, word):
         suffix += 1
     if prefix < 1 or suffix < 2:
         return False
-    mid_w = word[prefix:len(word) - suffix]
-    mid_t = token[prefix:len(token) - suffix]
+    mid_w = word[prefix : len(word) - suffix]
+    mid_t = token[prefix : len(token) - suffix]
     if len(mid_w) <= 1 and len(mid_t) <= 1:
         return True  # substitution, insertion or deletion
     return len(mid_w) == len(mid_t) == 2 and mid_w == mid_t[::-1]  # transposition
@@ -111,9 +110,7 @@ class SQLiteStore:
                 "id UNINDEXED, path, heading, body, tokenize='trigram')"
             )
             self.db.execute("CREATE TABLE IF NOT EXISTS trigram_state(key TEXT PRIMARY KEY)")
-            if self.db.execute(
-                "SELECT 1 FROM trigram_state WHERE key='backfilled'"
-            ).fetchone():
+            if self.db.execute("SELECT 1 FROM trigram_state WHERE key='backfilled'").fetchone():
                 return
             self.db.execute("DELETE FROM chunks_trigram")
             self.db.execute(
@@ -316,7 +313,7 @@ class SQLiteStore:
         )[:FUZZY_MAX_TOKENS]
         if not tokens:
             return []
-        trigrams = sorted({token[i:i + 3] for token in tokens for i in range(len(token) - 2)})
+        trigrams = sorted({token[i : i + 3] for token in tokens for i in range(len(token) - 2)})
         match = " OR ".join('"' + tri.replace('"', '""') + '"' for tri in trigrams)
         with self._read_connection() as db:
             rows = db.execute(
@@ -324,7 +321,7 @@ class SQLiteStore:
                 "WHERE chunks_trigram MATCH ? ORDER BY bm25(chunks_trigram) LIMIT ?",
                 (match, FUZZY_SCAN_LIMIT),
             ).fetchall()
-        results = []
+        results: list[dict] = []
         for row in rows:
             words = re.findall(r"[\w-]+", f"{row['heading'] or ''} {row['body']} {row['path']}")
             hit = any(
