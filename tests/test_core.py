@@ -73,6 +73,49 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.store.search_fuzzy("Steuererklaerung Abgabe"), [])
         self.assertEqual(self.store.search_fuzzy("Matratze kaufen"), [])
 
+    def test_fuzzy_bmw_and_matte_negatives_do_not_match_target_query(self):
+        for path, text in [
+            ("yoga.md", "Matte Yoga Training Fitness"),
+            ("bmw.md", "BMW X3 elektrische Heckklappe Ladekante"),
+            ("mat.md", "fyssmatte X3 fahrerseite hinten"),
+        ]:
+            self.store.upsert_file(path, "digest", [(path, "H", text, 1)])
+        rows = self.store.search_fuzzy("die fussmatte X3", limit=5)
+        self.assertEqual([row["path"] for row in rows], ["mat.md"])
+        self.assertEqual(self.store.search_fuzzy("Matratze kaufen"), [])
+
+    def test_fuzzy_index_stays_consistent_on_upsert_replace_and_delete(self):
+        def trigram_ids():
+            return {r[0] for r in self.store.db.execute("SELECT id FROM chunks_trigram")}
+
+        self.store.upsert_file("a.md", "d1", [("a1", "H", "fyssmatte alt", 1)])
+        self.store.upsert_file("a.md", "d2", [("a2", "H", "Heckklappe neu", 1)])
+        self.assertEqual(trigram_ids(), {"a2"})
+        self.assertEqual(self.store.search_fuzzy("fussmatte"), [])
+        self.store.upsert_file_precomputed("b.md", "d3", [("b1", "H", "fyssmatte b", 1, [0.0])])
+        self.assertEqual(trigram_ids(), {"a2", "b1"})
+        self.store.upsert_file_precomputed("b.md", "d4", [("b2", "H", "Heckklappe", 1, [0.0])])
+        self.assertEqual(trigram_ids(), {"a2", "b2"})
+        self.store.delete_file("a.md")
+        self.store.delete_file("b.md")
+        self.assertEqual(trigram_ids(), set())
+
+    def test_fuzzy_index_backfills_existing_database(self):
+        path = self.root / "legacy.db"
+        legacy = SQLiteStore(path, enable_fuzzy=False)
+        legacy.upsert_file("mat.md", "d", [("m", "H", "fyssmatte X3", 1)])
+        legacy.close()
+        upgraded = SQLiteStore(path)
+        rows = upgraded.search_fuzzy("fussmatte")
+        self.assertEqual([r["path"] for r in rows], ["mat.md"])
+        upgraded.close()
+        reopened = SQLiteStore(path)  # backfill must be idempotent
+        try:
+            count = reopened.db.execute("SELECT COUNT(*) FROM chunks_trigram").fetchone()[0]
+            self.assertEqual(count, 1)
+        finally:
+            reopened.close()
+
     def test_fuzzy_index_can_be_disabled_for_large_document_corpus(self):
         store = SQLiteStore(enable_fuzzy=False)
         try:

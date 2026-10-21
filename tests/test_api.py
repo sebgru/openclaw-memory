@@ -138,6 +138,30 @@ class ApiTests(unittest.TestCase):
         finally:
             selected.close()
 
+    def test_hybrid_search_typo_target_ranks_first_and_overlaps_stay_out(self):
+        from memory_store.sqlite_store import SQLiteStore
+
+        selected = SQLiteStore()
+        try:
+            for path, text in [
+                ("yoga.md", "Matte Yoga Training Fitness"),
+                ("bmw.md", "BMW X3 elektrische Heckklappe Ladekante"),
+                ("mat.md", "fyssmatte X3 fahrerseite hinten"),
+            ]:
+                selected.upsert_file(path, "digest", [(path, "H", text, 1)])
+            results = server.hybrid_search("die fussmatte X3", 3, selected, None)
+            self.assertEqual(results[0]["path"], "mat.md")
+            self.assertTrue(results[0]["fuzzy_match"])
+            by_path = {r["path"]: r for r in results}
+            self.assertNotIn("yoga.md", by_path)
+            self.assertFalse(by_path.get("bmw.md", {}).get("fuzzy_match", False))
+            # A fuzzy-only hit must not count as lexical evidence.
+            only = server.hybrid_search("fussmatte", 3, selected, None)
+            self.assertEqual([r["path"] for r in only], ["mat.md"])
+            self.assertEqual(only[0]["lexical_evidence"], 0)
+        finally:
+            selected.close()
+
     def test_search_labels_output_registry_as_artifact(self):
         original = server.store.search
         try:
