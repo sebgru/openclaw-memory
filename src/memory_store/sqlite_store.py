@@ -233,7 +233,7 @@ class SQLiteStore:
     def close(self):
         self.db.close()
 
-    def search_fuzzy(self, query, limit=20, min_similarity=0.72):
+    def search_fuzzy(self, query, limit=20, min_similarity=0.8):
         """Return typo-tolerant candidates for distinctive query tokens.
 
         FTS5's trigram index narrows the corpus; edit similarity is then checked
@@ -269,7 +269,9 @@ class SQLiteStore:
                     difflib.SequenceMatcher(None, token, word.casefold()).ratio()
                     for token in tokens
                     for word in words
-                    if len(word) >= 5
+                    # Exact word hits are ordinary lexical evidence; fuzzy only
+                    # contributes for genuine near-misses (typos).
+                    if len(word) >= 5 and word.casefold() != token
                 ),
                 default=0.0,
             )

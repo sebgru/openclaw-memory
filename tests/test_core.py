@@ -60,6 +60,19 @@ class CoreTests(unittest.TestCase):
         self.store.delete_file("sessions/mat.md")
         self.assertEqual(self.store.search_fuzzy("die fussmatte X3"), [])
 
+    def test_fuzzy_search_negative_controls(self):
+        for path, text in [
+            ("steuer.md", "Steuererklaerung Abgabe Finanzamt"),
+            ("yoga.md", "Matte Yoga Training Fitness"),
+            ("bmw.md", "BMW X3 elektrische Heckklappe"),
+        ]:
+            self.store.upsert_file(path, "digest", [(path, "H", text, 1)])
+        # Unrelated query, exact-word hit, and a merely similar-looking word
+        # must not produce fuzzy candidates.
+        self.assertEqual(self.store.search_fuzzy("weather forecast tomorrow"), [])
+        self.assertEqual(self.store.search_fuzzy("Steuererklaerung Abgabe"), [])
+        self.assertEqual(self.store.search_fuzzy("Matratze kaufen"), [])
+
     def test_fuzzy_index_can_be_disabled_for_large_document_corpus(self):
         store = SQLiteStore(enable_fuzzy=False)
         try:

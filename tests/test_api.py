@@ -134,7 +134,7 @@ class ApiTests(unittest.TestCase):
             # FTS finds only the exact X3 token; fuzzy score adds separate
             # retrieval evidence without pretending the misspelled word matched.
             self.assertLess(results[0]["lexical_evidence"], 0.01)
-            self.assertGreater(results[0]["fuzzy_score"], 0.72)
+            self.assertGreater(results[0]["fuzzy_score"], 0.8)
         finally:
             selected.close()
 
