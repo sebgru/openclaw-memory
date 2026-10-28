@@ -13,6 +13,7 @@ from .document_indexer import DocumentIndexer, IndexBusyError
 from .embeddings import EmbeddingClient
 from .indexer import Indexer
 from .maintenance import database_availability, verify_database
+from .nimble import rerank as nimble_rerank
 from .promotion import PromotionError, candidates, promote
 from .qdrant import QdrantStore, point_id
 from .sqlite_store import SQLiteStore
@@ -468,6 +469,7 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool"):
                 item[field] = max(item[field], row.get(field, 0))
 
     results = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
+    results = nimble_rerank(query, results)
     return apply_search_profile(results, limit, profile), warnings, coverage, degraded
 
 
