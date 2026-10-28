@@ -14,14 +14,50 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from memory_store import server  # noqa: E402
 
 ROWS = [
-    {"id": "a", "text": "alpha", "path": "a.md", "heading": "H1", "line": 1, "score": 0.9,
-     "lexical_evidence": 0, "semantic_similarity": 0.3, "exact_match": False},
-    {"id": "b", "text": "bravo", "path": "b.md", "heading": "H2", "line": 2, "score": 0.8,
-     "lexical_evidence": 0, "semantic_similarity": 0.3, "exact_match": True},
-    {"id": "c", "text": "charlie", "path": "c.md", "heading": "H3", "line": 3, "score": 0.7,
-     "lexical_evidence": 0, "semantic_similarity": 0.3, "exact_match": False},
-    {"id": "d", "text": "delta", "path": "d.md", "heading": "H4", "line": 4, "score": 0.6,
-     "lexical_evidence": 0, "semantic_similarity": 0.3, "exact_match": False},
+    {
+        "id": "a",
+        "text": "alpha",
+        "path": "a.md",
+        "heading": "H1",
+        "line": 1,
+        "score": 0.9,
+        "lexical_evidence": 0,
+        "semantic_similarity": 0.3,
+        "exact_match": False,
+    },
+    {
+        "id": "b",
+        "text": "bravo",
+        "path": "b.md",
+        "heading": "H2",
+        "line": 2,
+        "score": 0.8,
+        "lexical_evidence": 0,
+        "semantic_similarity": 0.3,
+        "exact_match": True,
+    },
+    {
+        "id": "c",
+        "text": "charlie",
+        "path": "c.md",
+        "heading": "H3",
+        "line": 3,
+        "score": 0.7,
+        "lexical_evidence": 0,
+        "semantic_similarity": 0.3,
+        "exact_match": False,
+    },
+    {
+        "id": "d",
+        "text": "delta",
+        "path": "d.md",
+        "heading": "H4",
+        "line": 4,
+        "score": 0.6,
+        "lexical_evidence": 0,
+        "semantic_similarity": 0.3,
+        "exact_match": False,
+    },
 ]
 
 
@@ -36,20 +72,38 @@ class Stub(BaseHTTPRequestHandler):
         self.server.requests.append(body)
         if cls.mode == "timeout":
             time.sleep(0.6)
-        score = next((p for text, p in (("alpha", 0.1), ("charlie", 0.9), ("delta", 0.4))
-                      if text in body.get("state", "")), 0.2)
-        answer = {"answers": {"relevance": {
-            "type": "choice", "choice": "relevant",
-            "probabilities": {"relevant": score, "not_relevant": 1 - score},
-        }}}
+        score = next(
+            (
+                p
+                for text, p in (("alpha", 0.1), ("charlie", 0.9), ("delta", 0.4))
+                if text in body.get("state", "")
+            ),
+            0.2,
+        )
+        answer = {
+            "answers": {
+                "relevance": {
+                    "type": "choice",
+                    "choice": "relevant",
+                    "probabilities": {"relevant": score, "not_relevant": 1 - score},
+                }
+            }
+        }
         code, payload = 200, answer
         if cls.mode == "http500":
             code = 500
         elif cls.mode == "malformed":
             payload = {"nope": 1}
         elif cls.mode == "late_bad" and cls.calls >= 2:
-            payload = {"answers": {"relevance": {"type": "choice", "choice": "relevant",
-                                                     "probabilities": {"relevant": "bad"}}}}
+            payload = {
+                "answers": {
+                    "relevance": {
+                        "type": "choice",
+                        "choice": "relevant",
+                        "probabilities": {"relevant": "bad"},
+                    }
+                }
+            }
         data = b"not json" if cls.mode == "garbage" else json.dumps(payload).encode()
         try:
             self.send_response(code)
@@ -129,9 +183,15 @@ class NimbleRerankTests(unittest.TestCase):
         self.assertEqual(Stub.calls, 3)  # Exact candidate "b" is never sent to Nimble.
         self.assertEqual(self.ids(payload), ["b", "c", "d", "a"])
         self.assertEqual([r["model"] for r in self.stub.requests], ["nimble:9b"] * 3)
-        self.assertTrue(all(request["state"].startswith("Query:\n") for request in self.stub.requests))
-        self.assertTrue(all(request["questions"]["relevance"]["type"] == "choice"
-                            for request in self.stub.requests))
+        self.assertTrue(
+            all(request["state"].startswith("Query:\n") for request in self.stub.requests)
+        )
+        self.assertTrue(
+            all(
+                request["questions"]["relevance"]["type"] == "choice"
+                for request in self.stub.requests
+            )
+        )
         by_id = {r["path"][0]: r for r in baseline["results"]}
         for item in payload["results"]:
             self.assertEqual(item, by_id[item["path"][0]])

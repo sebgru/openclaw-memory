@@ -135,6 +135,7 @@ def rerank(query, results):
         return baseline
 
     selected_sorted = [
-        item for _, item in sorted(enumerate(selected), key=lambda pair: (-scores[pair[0]], pair[0]))
+        item
+        for _, item in sorted(enumerate(selected), key=lambda pair: (-scores[pair[0]], pair[0]))
     ]
     return exact + selected_sorted + remaining_non_exact
