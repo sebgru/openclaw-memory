@@ -16,7 +16,7 @@ curl 'http://localhost:8080/search?q=release%20notes&limit=5'
 curl 'http://localhost:8080/unified/search?q=release%20notes&limit=5&scope=all'
 ```
 
-Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PATTERNS`, `EXCLUDE_PATTERNS`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, `LOG_LEVEL`, and `PORT`. No credentials or deployment-specific paths are required. A separately mounted converted-Markdown corpus can be enabled with the `DOCUMENTS_*` variables below; the service indexes it but never converts or modifies source documents.
+Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PATTERNS`, `EXCLUDE_PATTERNS`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, `LOG_LEVEL`, and `PORT`. No credentials or deployment-specific paths are required. Optional Nimble reranking is separately configured and disabled unless `NIMBLE_RERANK_URL` is set. A separately mounted converted-Markdown corpus can be enabled with the `DOCUMENTS_*` variables below; the service indexes it but never converts or modifies source documents.
 
 For a tiered memory layout, including a separate historical session archive and a human-reviewed promotion workflow, see [Tiered memory architecture](docs/MEMORY_ARCHITECTURE.md). Set `ARCHIVE_ROOT`, `ARCHIVE_SQLITE_PATH`, and optionally `ARCHIVE_QDRANT_COLLECTION` to enable the explicit `/archive/*` API.
 
@@ -39,6 +39,9 @@ For a tiered memory layout, including a separate historical session archive and 
 | `PROMPT_ARTIFACT_QUOTA` | `1` | Maximum artifact results in the prompt profile |
 | `PROMPT_SESSION_QUOTA` | `2` | Maximum live-session results in the prompt profile |
 | `PROMPT_ARCHIVE_QUOTA` | `1` | Maximum archive results in the prompt profile |
+| `NIMBLE_RERANK_URL` | unset | Optional local Ollama base URL; enables Nimble only for `localhost`, loopback, or `ollama-coder` over HTTP. The service appends `/v1/systemone`. Unset/invalid values leave baseline ranking unchanged. |
+| `NIMBLE_RERANK_TIMEOUT` | `8.0` | Maximum total Nimble scoring time per query in seconds (clamped to 0.05–8) |
+| `NIMBLE_RERANK_MAX_CANDIDATES` | `10` | Maximum non-exact candidates scored per query (clamped to 1–10); exact matches are never sent to Nimble |
 | `DOCUMENTS_ROOT` | unset | Read-only converted-Markdown corpus; enables `/documents/*` |
 | `DOCUMENTS_SQLITE_PATH` | `documents.db` | Separate document FTS/index-state database |
 | `DOCUMENTS_QDRANT_COLLECTION` | `documents` | Separate document vector collection |
@@ -84,6 +87,7 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
   also adds `<source>: not configured`, so clients that ignore `coverage`
   still see the gap. Clients that ignore unknown fields are unaffected.
 - `/unified/search` adds `low_confidence: true` and a `confidence_note` when no result has lexical or exact evidence and every semantic similarity is below `LOW_CONFIDENCE_SEMANTIC_FLOOR` (default 0.6), i.e. the query probably has no relevant match. Results are still returned. Queries whose terms all appear in a chunk (two or more terms) get `FULL_COVERAGE_BOOST` (default 1.0) so multi-identifier lexical matches rank above semantic-only hits.
+- When `NIMBLE_RERANK_URL` is configured, `/unified/search` may reorder only the bounded non-exact candidates using the `nimble:9b` `/v1/systemone` relevance choice. Exact matches retain their baseline order and precedence. Any timeout, transport/HTTP error, or invalid Nimble response discards partial scores and returns the untouched baseline results; coverage, provenance, scores, and confidence fields are not recalculated. This option does not alter the confidence floor. Keep it unset to disable reranking.
 - `profile=tool` preserves the broad, backward-compatible result set.
   `profile=prompt` applies normalized evidence thresholds and per-source quotas
   so automatic recall cannot be dominated by one corpus. Thresholds apply to
