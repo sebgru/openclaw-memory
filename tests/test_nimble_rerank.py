@@ -8,10 +8,11 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from memory_store import server  # noqa: E402
+from memory_store import nimble, server
 
 ROWS = [
     {
@@ -135,15 +136,27 @@ class NimbleRerankTests(unittest.TestCase):
     def setUp(self):
         Stub.mode, Stub.calls = "ok", 0
         self.stub.requests.clear()
-        self.saved = (server.hybrid_search, server.archive_store, server.documents_store)
+        self.saved = (
+            server.hybrid_search,
+            server.archive_store,
+            server.documents_store,
+        )
         server.hybrid_search = lambda *a, **k: copy.deepcopy(ROWS)
         server.archive_store = server.documents_store = None
-        for name in ("NIMBLE_RERANK_URL", "NIMBLE_RERANK_TIMEOUT", "NIMBLE_RERANK_MAX_CANDIDATES"):
+        for name in (
+            "NIMBLE_RERANK_URL",
+            "NIMBLE_RERANK_TIMEOUT",
+            "NIMBLE_RERANK_MAX_CANDIDATES",
+        ):
             os.environ.pop(name, None)
 
     def tearDown(self):
         server.hybrid_search, server.archive_store, server.documents_store = self.saved
-        for name in ("NIMBLE_RERANK_URL", "NIMBLE_RERANK_TIMEOUT", "NIMBLE_RERANK_MAX_CANDIDATES"):
+        for name in (
+            "NIMBLE_RERANK_URL",
+            "NIMBLE_RERANK_TIMEOUT",
+            "NIMBLE_RERANK_MAX_CANDIDATES",
+        ):
             os.environ.pop(name, None)
 
     def search(self):
@@ -198,7 +211,9 @@ class NimbleRerankTests(unittest.TestCase):
         self.assertEqual(payload["coverage"], baseline["coverage"])
         self.assertEqual(payload.get("low_confidence"), baseline.get("low_confidence"))
 
-    def test_exact_precedence_applies_even_when_only_one_non_exact_candidate_is_scored(self):
+    def test_exact_precedence_applies_even_when_only_one_non_exact_candidate_is_scored(
+        self,
+    ):
         server.hybrid_search = lambda *a, **k: copy.deepcopy(ROWS[:2])
         self.enable()
         status, payload = self.search()
@@ -238,6 +253,89 @@ class NimbleRerankTests(unittest.TestCase):
             type(self).stub.requests = []
             Thread(target=type(self).stub.serve_forever, daemon=True).start()
             type(self).url = f"http://127.0.0.1:{type(self).stub.server_address[1]}"
+
+
+class FakeResponse:
+    def __init__(self, status=200, body=b"{}"):
+        self.status = status
+        self._body = body
+
+    def read(self, _size):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class NimbleUnitTests(unittest.TestCase):
+    BASE_URL = "http://127.0.0.1:9"
+    ENDPOINT = BASE_URL + "/v1/systemone"
+    ENV = ("NIMBLE_RERANK_URL", "NIMBLE_RERANK_TIMEOUT", "NIMBLE_RERANK_MAX_CANDIDATES")
+
+    def setUp(self):
+        for name in self.ENV:
+            os.environ.pop(name, None)
+        os.environ["NIMBLE_RERANK_URL"] = self.BASE_URL
+
+    def tearDown(self):
+        for name in self.ENV:
+            os.environ.pop(name, None)
+
+    def test_invalid_numeric_settings_disable_rerank(self):
+        for name in ("NIMBLE_RERANK_TIMEOUT", "NIMBLE_RERANK_MAX_CANDIDATES"):
+            for bad in ("nope", ""):
+                with self.subTest(name=name, value=bad):
+                    os.environ[name] = bad
+                    self.assertIsNone(nimble.settings())
+                    before = copy.deepcopy(ROWS)
+                    with mock.patch.object(
+                        nimble, "_score", side_effect=AssertionError("should not score")
+                    ):
+                        self.assertEqual(nimble.rerank("zeta", ROWS), before)
+            os.environ.pop(name, None)
+        self.assertEqual(nimble.settings(), (self.ENDPOINT, 8.0, 10))
+
+    def test_score_rejects_non_200_status(self):
+        with (
+            mock.patch.object(
+                nimble.urllib.request, "urlopen", return_value=FakeResponse(status=201)
+            ),
+            self.assertRaises(nimble.RerankError) as raised,
+        ):
+            nimble._score(self.ENDPOINT, 1.0, "q", "t")
+        self.assertEqual(str(raised.exception), "bad systemone status")
+
+    def test_score_rejects_oversized_response(self):
+        body = b"x" * (nimble.MAX_RESPONSE_BYTES + 1)
+        with (
+            mock.patch.object(
+                nimble.urllib.request, "urlopen", return_value=FakeResponse(body=body)
+            ),
+            self.assertRaises(nimble.RerankError) as raised,
+        ):
+            nimble._score(self.ENDPOINT, 1.0, "q", "t")
+        self.assertEqual(str(raised.exception), "systemone response too large")
+
+    def test_all_exact_results_never_call_nimble(self):
+        exact_only = [
+            dict(ROWS[1], id="b1", path="b1.md"),
+            dict(ROWS[1], id="b2", path="b2.md"),
+        ]
+        before = copy.deepcopy(exact_only)
+        with mock.patch.object(nimble, "_score", side_effect=AssertionError("should not score")):
+            self.assertEqual(nimble.rerank("zeta", exact_only), before)
+
+    def test_expired_budget_returns_baseline_without_scoring(self):
+        candidates = [dict(ROWS[0]), dict(ROWS[2])]
+        before = copy.deepcopy(candidates)
+        with mock.patch.object(nimble, "settings", return_value=(self.ENDPOINT, 0.0, 10)):
+            with mock.patch.object(
+                nimble, "_score", side_effect=AssertionError("should not score")
+            ):
+                self.assertEqual(nimble.rerank("zeta", candidates), before)
 
 
 if __name__ == "__main__":
