@@ -4,6 +4,7 @@ import ipaddress
 import json
 import math
 import os
+import threading
 import time
 import urllib.request
 from urllib.parse import urlparse
@@ -12,6 +13,14 @@ LOCAL_HOSTS = {"localhost", "ollama-coder"}
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_TEXT_CHARS = 8_000
 MODEL = "nimble:9b"
+# Must stay below the caller's request window so a cold reranker cannot break /unified/search.
+MAX_DEADLINE = 4.0
+DEFAULT_DEADLINE = 3.0
+WARMUP_TIMEOUT = 60.0
+DEFAULT_COOLDOWN, MIN_COOLDOWN, MAX_COOLDOWN = 30.0, 5.0, 300.0
+_state_lock = threading.Lock()
+_skip_until = 0.0
+_warming = False
 
 
 class RerankError(Exception):
@@ -39,7 +48,10 @@ def settings():
     ):
         return None
     try:
-        deadline = min(8.0, max(0.05, float(os.getenv("NIMBLE_RERANK_TIMEOUT", "8.0"))))
+        deadline = min(
+            MAX_DEADLINE,
+            max(0.05, float(os.getenv("NIMBLE_RERANK_TIMEOUT", str(DEFAULT_DEADLINE)))),
+        )
         cap = min(10, max(1, int(os.getenv("NIMBLE_RERANK_MAX_CANDIDATES", "10"))))
     except ValueError:
         return None
@@ -101,6 +113,52 @@ def _score(endpoint, timeout, query, text):
         raise RerankError("malformed systemone response") from exc
 
 
+def _reset_state():
+    global _skip_until, _warming
+    with _state_lock:
+        _skip_until, _warming = 0.0, False
+
+
+def _warm(endpoint, query, text):
+    global _skip_until, _warming
+    try:
+        _score(endpoint, WARMUP_TIMEOUT, query, text)
+        with _state_lock:
+            _skip_until = 0.0
+    except Exception:  # noqa: BLE001 - warm-up is best effort
+        pass
+    finally:
+        with _state_lock:
+            _warming = False
+
+
+def _start_warm(endpoint, query, text):
+    threading.Thread(target=_warm, args=(endpoint, query, text), daemon=True).start()
+
+
+def _cooldown():
+    try:
+        value = float(os.getenv("NIMBLE_RERANK_COOLDOWN", str(DEFAULT_COOLDOWN)))
+    except ValueError:
+        return DEFAULT_COOLDOWN
+    return min(MAX_COOLDOWN, max(MIN_COOLDOWN, value)) if math.isfinite(value) else DEFAULT_COOLDOWN
+
+
+def _fail_fast(endpoint, query, selected):
+    """Start a cooldown after a failure; at most one warm-up request runs at a time."""
+    global _skip_until, _warming
+    with _state_lock:
+        _skip_until = time.monotonic() + _cooldown()
+        start = not _warming
+        _warming = True
+    if start:
+        try:
+            _start_warm(endpoint, query, str(selected[0].get("text", "")))
+        except Exception:  # noqa: BLE001 - thread creation must not break search
+            with _state_lock:
+                _warming = False
+
+
 def rerank(query, results):
     """Reorder bounded non-exact candidates; any failure returns baseline intact."""
     config = settings()
@@ -118,6 +176,8 @@ def rerank(query, results):
         return baseline
     if len(selected) < 2:
         return exact + selected + remaining_non_exact
+    if time.monotonic() < _skip_until:
+        return baseline
     started = time.monotonic()
     scores = {}
     try:
@@ -132,6 +192,7 @@ def rerank(query, results):
                 str(item.get("text", "")),
             )
     except Exception:  # noqa: BLE001 - no partial ordering may escape
+        _fail_fast(endpoint, query, selected)
         return baseline
 
     selected_sorted = [

@@ -134,6 +134,11 @@ class NimbleRerankTests(unittest.TestCase):
         cls.stub.shutdown()
 
     def setUp(self):
+        nimble._reset_state()
+        self.addCleanup(nimble._reset_state)
+        warm = mock.patch.object(nimble, "_start_warm")
+        self.warm = warm.start()
+        self.addCleanup(warm.stop)
         Stub.mode, Stub.calls = "ok", 0
         self.stub.requests.clear()
         self.saved = (
@@ -147,6 +152,7 @@ class NimbleRerankTests(unittest.TestCase):
             "NIMBLE_RERANK_URL",
             "NIMBLE_RERANK_TIMEOUT",
             "NIMBLE_RERANK_MAX_CANDIDATES",
+            "NIMBLE_RERANK_COOLDOWN",
         ):
             os.environ.pop(name, None)
 
@@ -156,6 +162,7 @@ class NimbleRerankTests(unittest.TestCase):
             "NIMBLE_RERANK_URL",
             "NIMBLE_RERANK_TIMEOUT",
             "NIMBLE_RERANK_MAX_CANDIDATES",
+            "NIMBLE_RERANK_COOLDOWN",
         ):
             os.environ.pop(name, None)
 
@@ -234,6 +241,7 @@ class NimbleRerankTests(unittest.TestCase):
         self.enable(timeout="0.05")
         for mode in ("timeout", "http500", "malformed", "late_bad", "garbage"):
             with self.subTest(mode=mode):
+                nimble._reset_state()
                 Stub.mode, Stub.calls = mode, 0
                 started = time.monotonic()
                 status, payload = self.search()
@@ -273,9 +281,20 @@ class FakeResponse:
 class NimbleUnitTests(unittest.TestCase):
     BASE_URL = "http://127.0.0.1:9"
     ENDPOINT = BASE_URL + "/v1/systemone"
-    ENV = ("NIMBLE_RERANK_URL", "NIMBLE_RERANK_TIMEOUT", "NIMBLE_RERANK_MAX_CANDIDATES")
+    ENV = (
+        "NIMBLE_RERANK_URL",
+        "NIMBLE_RERANK_TIMEOUT",
+        "NIMBLE_RERANK_MAX_CANDIDATES",
+        "NIMBLE_RERANK_COOLDOWN",
+    )
 
     def setUp(self):
+        nimble._reset_state()
+        self.addCleanup(nimble._reset_state)
+        self.real_start_warm = nimble._start_warm
+        warm = mock.patch.object(nimble, "_start_warm")
+        self.warm = warm.start()
+        self.addCleanup(warm.stop)
         for name in self.ENV:
             os.environ.pop(name, None)
         os.environ["NIMBLE_RERANK_URL"] = self.BASE_URL
@@ -296,7 +315,64 @@ class NimbleUnitTests(unittest.TestCase):
                     ):
                         self.assertEqual(nimble.rerank("zeta", ROWS), before)
             os.environ.pop(name, None)
-        self.assertEqual(nimble.settings(), (self.ENDPOINT, 8.0, 10))
+        self.assertEqual(nimble.settings(), (self.ENDPOINT, 3.0, 10))
+
+    def test_timeout_is_capped_below_caller_deadline(self):
+        os.environ["NIMBLE_RERANK_TIMEOUT"] = "60"
+        self.assertEqual(nimble.settings()[1], 4.0)
+
+    def test_failure_starts_cooldown_and_single_warmup(self):
+        with mock.patch.object(nimble, "_score", side_effect=OSError("down")) as score:
+            self.assertEqual(nimble.rerank("zeta", ROWS), ROWS)
+            self.assertEqual(nimble.rerank("zeta", ROWS), ROWS)
+            self.assertEqual(score.call_count, 1)
+        self.assertEqual(self.warm.call_count, 1)
+        nimble._skip_until = 0.0
+        with mock.patch.object(nimble, "_score", side_effect=OSError("down")):
+            nimble.rerank("zeta", ROWS)
+        self.assertEqual(self.warm.call_count, 1)
+
+    def test_fail_fast_clears_warming_when_thread_creation_fails(self):
+        self.warm.side_effect = RuntimeError("cannot start thread")
+        nimble._fail_fast(self.ENDPOINT, "zeta", ROWS)
+        self.assertFalse(nimble._warming)
+        self.assertGreater(nimble._skip_until, time.monotonic())
+
+    def test_warm_success_clears_cooldown(self):
+        nimble._skip_until, nimble._warming = 123.0, True
+        with mock.patch.object(nimble, "_score", return_value=0.5) as score:
+            nimble._warm(self.ENDPOINT, "zeta", "alpha")
+        score.assert_called_once_with(self.ENDPOINT, nimble.WARMUP_TIMEOUT, "zeta", "alpha")
+        self.assertEqual(nimble._skip_until, 0.0)
+        self.assertFalse(nimble._warming)
+
+    def test_warm_failure_is_best_effort(self):
+        nimble._warming = True
+        with mock.patch.object(nimble, "_score", side_effect=OSError("down")):
+            nimble._warm(self.ENDPOINT, "zeta", "alpha")
+        self.assertFalse(nimble._warming)
+
+    def test_start_warm_spawns_daemon_thread(self):
+        with mock.patch.object(nimble.threading, "Thread") as thread:
+            self.real_start_warm(self.ENDPOINT, "zeta", "alpha")
+        thread.assert_called_once_with(
+            target=nimble._warm,
+            args=(self.ENDPOINT, "zeta", "alpha"),
+            daemon=True,
+        )
+        thread.return_value.start.assert_called_once_with()
+
+    def test_cooldown_invalid_and_nonfinite_values_use_default(self):
+        for value in ("nope", "", "inf", "-inf", "nan"):
+            with self.subTest(value=value):
+                os.environ["NIMBLE_RERANK_COOLDOWN"] = value
+                self.assertEqual(nimble._cooldown(), nimble.DEFAULT_COOLDOWN)
+
+    def test_cooldown_is_clamped(self):
+        os.environ["NIMBLE_RERANK_COOLDOWN"] = "1"
+        self.assertEqual(nimble._cooldown(), nimble.MIN_COOLDOWN)
+        os.environ["NIMBLE_RERANK_COOLDOWN"] = "9999"
+        self.assertEqual(nimble._cooldown(), nimble.MAX_COOLDOWN)
 
     def test_score_rejects_non_200_status(self):
         with (

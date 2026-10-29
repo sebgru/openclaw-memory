@@ -40,7 +40,8 @@ For a tiered memory layout, including a separate historical session archive and 
 | `PROMPT_SESSION_QUOTA` | `2` | Maximum live-session results in the prompt profile |
 | `PROMPT_ARCHIVE_QUOTA` | `1` | Maximum archive results in the prompt profile |
 | `NIMBLE_RERANK_URL` | unset | Optional local Ollama base URL; enables Nimble only for `localhost`, loopback, or `ollama-coder` over HTTP. The service appends `/v1/systemone`. Unset/invalid values leave baseline ranking unchanged. |
-| `NIMBLE_RERANK_TIMEOUT` | `8.0` | Maximum total Nimble scoring time per query in seconds (clamped to 0.05–8) |
+| `NIMBLE_RERANK_TIMEOUT` | `3.0` | Nimble scoring budget per query in seconds (clamped to 0.05–4). This bounds the intended scoring budget, not total `/unified/search` latency; retrieval time and slow socket operations can add time beyond it |
+| `NIMBLE_RERANK_COOLDOWN` | `30` | Seconds (clamped to 5–300) during which reranking is skipped and the baseline is returned immediately after a Nimble failure or timeout. A failure also starts at most one background warm-up request (60 s timeout, one at a time, per process) so the model can finish loading; a successful warm-up ends the cooldown early. Failed warm-ups are not retried until a later request fails after the cooldown |
 | `NIMBLE_RERANK_MAX_CANDIDATES` | `10` | Maximum non-exact candidates scored per query (clamped to 1–10); exact matches are never sent to Nimble |
 | `DOCUMENTS_ROOT` | unset | Read-only converted-Markdown corpus; enables `/documents/*` |
 | `DOCUMENTS_SQLITE_PATH` | `documents.db` | Separate document FTS/index-state database |
