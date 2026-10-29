@@ -291,6 +291,7 @@ class NimbleUnitTests(unittest.TestCase):
     def setUp(self):
         nimble._reset_state()
         self.addCleanup(nimble._reset_state)
+        self.real_start_warm = nimble._start_warm
         warm = mock.patch.object(nimble, "_start_warm")
         self.warm = warm.start()
         self.addCleanup(warm.stop)
@@ -330,6 +331,48 @@ class NimbleUnitTests(unittest.TestCase):
         with mock.patch.object(nimble, "_score", side_effect=OSError("down")):
             nimble.rerank("zeta", ROWS)
         self.assertEqual(self.warm.call_count, 1)
+
+    def test_fail_fast_clears_warming_when_thread_creation_fails(self):
+        self.warm.side_effect = RuntimeError("cannot start thread")
+        nimble._fail_fast(self.ENDPOINT, "zeta", ROWS)
+        self.assertFalse(nimble._warming)
+        self.assertGreater(nimble._skip_until, time.monotonic())
+
+    def test_warm_success_clears_cooldown(self):
+        nimble._skip_until, nimble._warming = 123.0, True
+        with mock.patch.object(nimble, "_score", return_value=0.5) as score:
+            nimble._warm(self.ENDPOINT, "zeta", "alpha")
+        score.assert_called_once_with(self.ENDPOINT, nimble.WARMUP_TIMEOUT, "zeta", "alpha")
+        self.assertEqual(nimble._skip_until, 0.0)
+        self.assertFalse(nimble._warming)
+
+    def test_warm_failure_is_best_effort(self):
+        nimble._warming = True
+        with mock.patch.object(nimble, "_score", side_effect=OSError("down")):
+            nimble._warm(self.ENDPOINT, "zeta", "alpha")
+        self.assertFalse(nimble._warming)
+
+    def test_start_warm_spawns_daemon_thread(self):
+        with mock.patch.object(nimble.threading, "Thread") as thread:
+            self.real_start_warm(self.ENDPOINT, "zeta", "alpha")
+        thread.assert_called_once_with(
+            target=nimble._warm,
+            args=(self.ENDPOINT, "zeta", "alpha"),
+            daemon=True,
+        )
+        thread.return_value.start.assert_called_once_with()
+
+    def test_cooldown_invalid_and_nonfinite_values_use_default(self):
+        for value in ("nope", "", "inf", "-inf", "nan"):
+            with self.subTest(value=value):
+                os.environ["NIMBLE_RERANK_COOLDOWN"] = value
+                self.assertEqual(nimble._cooldown(), nimble.DEFAULT_COOLDOWN)
+
+    def test_cooldown_is_clamped(self):
+        os.environ["NIMBLE_RERANK_COOLDOWN"] = "1"
+        self.assertEqual(nimble._cooldown(), nimble.MIN_COOLDOWN)
+        os.environ["NIMBLE_RERANK_COOLDOWN"] = "9999"
+        self.assertEqual(nimble._cooldown(), nimble.MAX_COOLDOWN)
 
     def test_score_rejects_non_200_status(self):
         with (
