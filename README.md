@@ -18,6 +18,8 @@ curl 'http://localhost:8080/unified/search?q=release%20notes&limit=5&scope=all'
 
 Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PATTERNS`, `EXCLUDE_PATTERNS`, `SQLITE_PATH`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_DIMENSIONS`, `LOG_LEVEL`, and `PORT`. No credentials or deployment-specific paths are required. Optional Nimble reranking is separately configured and disabled unless `NIMBLE_RERANK_URL` is set. A separately mounted converted-Markdown corpus can be enabled with the `DOCUMENTS_*` variables below; the service indexes it but never converts or modifies source documents.
 
+What this service is for, and what every change must preserve, is defined in [Requirements](docs/REQUIREMENTS.md).
+
 For a tiered memory layout, including a separate historical session archive and a human-reviewed promotion workflow, see [Tiered memory architecture](docs/MEMORY_ARCHITECTURE.md). Set `ARCHIVE_ROOT`, `ARCHIVE_SQLITE_PATH`, and optionally `ARCHIVE_QDRANT_COLLECTION` to enable the explicit `/archive/*` API.
 
 | Variable | Default | Purpose |
