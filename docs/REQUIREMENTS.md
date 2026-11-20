@@ -1,6 +1,6 @@
 # Requirements
 
-Status: draft v0.1. These requirements define what this service is for and
+Status: v1.1. These requirements define what this service is for and
 what every change must preserve. They are derived from the deploying owner's
 private system requirements and contain no personal data.
 
@@ -28,10 +28,11 @@ for compatibility until the deploying owner retires them.
 | SR-3 | Must | Prefer current over historical evidence: expose document date (from filename, metadata, or content) so newer documents outrank older ones for current-state questions, and mark results that are likely superseded. |
 | SR-4 | Must | Find earlier discussions and analyses in the archive by topic, returning the session identifier and date so the caller can open the original. |
 | SR-5 | Must | Never let backup copies, trim snapshots, or duplicate files outrank the canonical file. Exclusion patterns and duplicate detection are explicit and testable. |
-| SR-6 | Should | Support German, English, and Russian queries against mixed-language content with comparable recall. |
+| SR-6 | Must | Cross-language retrieval: a query in one language (for example English) finds content written in another (for example German) with recall comparable to a same-language query, in every scope. Lexical and vector stages must both support this (for example query translation or expansion for lexical search); a cross-language query must not depend on the vector stage alone. |
 | SR-7 | Should | Expose document category and conversion/OCR quality so callers and ranking can use them. |
 | SR-8 | Should | Normalize scores across scopes so results from different scopes can be merged without one scope dominating by scale alone. |
 | SR-9 | Could | Extract stable, dated facts (entity, attribute, value, source, date) from documents into a reviewable candidate list. Candidates are never promoted automatically. |
+| SR-10 | Must | Return responses that a single client entry point can merge with results from other memory backends: per-result scope, provenance, normalized score, and date, so the client never needs a second search tool. |
 
 ## Non-functional requirements
 
@@ -46,6 +47,10 @@ for compatibility until the deploying owner retires them.
 | SN-7 | Must | Public-safe repository: no personal data, credentials, or deployment-specific paths in code, tests, fixtures, or docs. Use synthetic examples. |
 | SN-8 | Should | Index freshness: documents and archive changes become searchable within a bounded, configurable delay; rebuilds never block search. |
 | SN-9 | Should | Indexes remain derived data: a full rebuild from source files is always possible and never required for normal recovery. |
+
+## Change log
+
+- v1.1: SR-6 raised to Must and sharpened to cross-language retrieval. Added SR-10 (merge-ready responses for a single client entry point).
 
 ## Out of scope
 
