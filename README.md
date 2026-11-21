@@ -41,11 +41,11 @@ For a tiered memory layout, including a separate historical session archive and 
 | `PROMPT_ARTIFACT_QUOTA` | `1` | Maximum artifact results in the prompt profile |
 | `PROMPT_SESSION_QUOTA` | `2` | Maximum live-session results in the prompt profile |
 | `PROMPT_ARCHIVE_QUOTA` | `1` | Maximum archive results in the prompt profile |
-| `NIMBLE_RERANK_URL` | unset | Optional local Ollama base URL; enables Nimble only for `localhost`, loopback, or `ollama-coder` over HTTP. The service appends `/v1/systemone`. Unset/invalid values leave baseline ranking unchanged. |
+| `NIMBLE_RERANK_URL` | unset | Optional local Ollama base URL; enables Nimble only for `localhost`, loopback, `ollama-coder`, or `ollama-rerank` over HTTP. The service appends `/v1/systemone`. Unset/invalid values leave baseline ranking unchanged. |
 | `NIMBLE_RERANK_TIMEOUT` | `3.0` | Nimble scoring budget per query in seconds (clamped to 0.05–4). This bounds the intended scoring budget, not total `/unified/search` latency; retrieval time and slow socket operations can add time beyond it |
 | `NIMBLE_RERANK_COOLDOWN` | `30` | Seconds (clamped to 5–300) during which reranking is skipped and the baseline is returned immediately after a Nimble failure or timeout. A failure also starts at most one background warm-up request (60 s timeout, one at a time, per process) so the model can finish loading; a successful warm-up ends the cooldown early. Failed warm-ups are not retried until a later request fails after the cooldown |
 | `NIMBLE_RERANK_MAX_CANDIDATES` | `10` | Maximum non-exact candidates scored per query (clamped to 1–10); exact matches are never sent to Nimble |
-| `NIMBLE_RERANK_KEEP_ALIVE` | `-1m` | Ollama `keep_alive` sent with every Nimble scoring request (Go duration string with a unit, e.g. `60s`, `10m`; a negative value such as `-1m` keeps the model loaded indefinitely). This per-request value overrides the Ollama server's `OLLAMA_KEEP_ALIVE`, so the default keeps Nimble resident and avoids a cold load inside a search request |
+| `NIMBLE_RERANK_KEEP_ALIVE` | `-1m` | Ollama residency duration for scoring and background warm-up. See format and default below. |
 | `DOCUMENTS_ROOT` | unset | Read-only converted-Markdown corpus; enables `/documents/*` |
 | `DOCUMENTS_SQLITE_PATH` | `documents.db` | Separate document FTS/index-state database |
 | `DOCUMENTS_QDRANT_COLLECTION` | `documents` | Separate document vector collection |
@@ -54,6 +54,13 @@ For a tiered memory layout, including a separate historical session archive and 
 | `PROMPT_DOCUMENT_QUOTA` | `2` | Maximum document results in the prompt profile |
 | `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` also logs unchanged files) |
 | `PORT` | `8080` | HTTP port the server listens on |
+
+`NIMBLE_RERANK_KEEP_ALIVE` accepts Go duration strings with a unit, such as
+`60s` or `10m`. Negative durations (default `-1m`) keep Nimble loaded indefinitely.
+An explicitly blank value falls back to `-1m`; bare integers are interpreted as
+seconds (`60` → `60s`, `-1` → `-1s`), matching Ollama's numeric JSON semantics.
+Both cases log a warning. This per-request value overrides the server's
+`OLLAMA_KEEP_ALIVE`; keeping Nimble resident avoids cold loads during searches.
 
 Run locally with Python 3.11+:
 

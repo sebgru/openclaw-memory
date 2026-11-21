@@ -375,14 +375,18 @@ class NimbleUnitTests(unittest.TestCase):
         os.environ["NIMBLE_RERANK_COOLDOWN"] = "9999"
         self.assertEqual(nimble._cooldown(), nimble.MAX_COOLDOWN)
 
-    def _sent_keep_alive(self):
+    def _sent_keep_alive(self, warm=False):
         probabilities = {"relevant": 0.9, "not_relevant": 0.1}
         answer = {"type": "choice", "choice": "relevant", "probabilities": probabilities}
         ok = json.dumps({"answers": {"relevance": answer}}).encode()
         with mock.patch.object(
             nimble.urllib.request, "urlopen", return_value=FakeResponse(body=ok)
         ) as urlopen:
-            nimble._score(self.ENDPOINT, 1.0, "q", "t")
+            if warm:
+                nimble._warm(self.ENDPOINT, "q", "t")
+            else:
+                nimble._score(self.ENDPOINT, 1.0, "q", "t")
+        self.assertEqual(urlopen.call_args.args[0].full_url, self.ENDPOINT)
         return json.loads(urlopen.call_args.args[0].data)["keep_alive"]
 
     def test_keep_alive_defaults_to_keep_loaded(self):
@@ -391,6 +395,33 @@ class NimbleUnitTests(unittest.TestCase):
     def test_keep_alive_env_override(self):
         os.environ["NIMBLE_RERANK_KEEP_ALIVE"] = "10m"
         self.assertEqual(self._sent_keep_alive(), "10m")
+
+    def test_keep_alive_blank_uses_default_and_warns(self):
+        for value in ("", "  ", "\t"):
+            with self.subTest(value=value):
+                os.environ["NIMBLE_RERANK_KEEP_ALIVE"] = value
+                with self.assertLogs(nimble.logger, level="WARNING") as logs:
+                    self.assertEqual(self._sent_keep_alive(), "-1m")
+                self.assertIn("Empty NIMBLE_RERANK_KEEP_ALIVE", logs.output[0])
+
+    def test_keep_alive_bare_integers_are_seconds_and_warn(self):
+        for value in ("-1", "0", "60", "+60", " 120 "):
+            with self.subTest(value=value):
+                os.environ["NIMBLE_RERANK_KEEP_ALIVE"] = value
+                with self.assertLogs(nimble.logger, level="WARNING") as logs:
+                    self.assertEqual(self._sent_keep_alive(), value.strip() + "s")
+                self.assertIn("interpreting as seconds", logs.output[0])
+
+    def test_warm_sends_configured_keep_alive(self):
+        os.environ["NIMBLE_RERANK_KEEP_ALIVE"] = "10m"
+        self.assertEqual(self._sent_keep_alive(warm=True), "10m")
+
+    def test_rerank_service_and_legacy_hosts_are_allowed(self):
+        for host in ("ollama-rerank", "ollama-coder", "localhost"):
+            with self.subTest(host=host):
+                base = f"http://{host}:11434"
+                os.environ["NIMBLE_RERANK_URL"] = base
+                self.assertEqual(nimble.settings(), (base + "/v1/systemone", 3.0, 10))
 
     def test_score_rejects_non_200_status(self):
         with (
