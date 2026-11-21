@@ -109,7 +109,7 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 - Results under `outputs/` are labeled with `source: "artifact"`; register
   generated files in `outputs/INDEX.md` so their metadata is searchable. The
   generated files themselves are not parsed as memory.
-- `GET /healthz` returns service health.
+- `GET /healthz` is a cheap liveness/readiness probe: it opens the database read-only (`database.integrity: not_checked`), returns exact `files`, index freshness and `age_seconds`, and skips `integrity_check`, chunk/FTS counts and vector diagnostics. Used by the Docker `HEALTHCHECK`.
 - `POST /archive/index`, `GET /archive/search`, and `GET /archive/status` operate on the separately configured historical archive.
 - `POST /documents/index`, `GET /documents/search`, and `GET /documents/status`
   operate on a separately configured converted-Markdown corpus. The index call
@@ -139,7 +139,7 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
   `502` when Qdrant fails, `503` when the database is busy.
 - `POST /documents/reconcile` uses the same explicit `{"confirm":true}` vector
   repair contract as the main/archive reconciliation endpoints.
-- `GET /status` (and `/healthz`) report SQLite integrity, index freshness (`last_index_started_at`, `last_index_completed_at`, `last_index_error`, `age_seconds`), and — when Qdrant is configured — vector parity diagnostics (`points`, `chunks`, `missing_vectors`).
+- `GET /status` reports full SQLite integrity (`PRAGMA integrity_check`), index freshness (`last_index_started_at`, `last_index_completed_at`, `last_index_error`, `age_seconds`), and — when Qdrant is configured — vector parity diagnostics (`points`, `chunks`, `missing_vectors`).
 - `POST /reconcile` (or `/archive/reconcile`) repairs missing Qdrant points only when sent with `{"confirm":true}`; it is operator-controlled, locked, and never deletes or replaces existing points. An optional `limit` (1–10000, default 1000) bounds how many missing points are upserted per call; the response reports `reconciled` and `remaining` counts.
 - `GET /promotion/candidates` lists queued candidates with `bytes` and an `eligible` flag (files over 256 KiB or empty are ineligible, with a `reason`); `POST /promotion/promote` promotes one only with an explicit `approved_by` value and never overwrites an existing destination.
 

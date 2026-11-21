@@ -342,6 +342,45 @@ class ApiExtendedTests(unittest.TestCase):
         self.assertIn("files", body)
         self.assertIn("chunks", body)
 
+    def test_healthz_is_cheap_and_skips_integrity_check(self):
+        with (
+            patch.object(server, "verify_database", side_effect=AssertionError("integrity_check")),
+            patch.object(
+                server, "database_availability", wraps=server.database_availability
+            ) as availability,
+        ):
+            status, body = self.request("GET", "/healthz")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["database"]["integrity"], "not_checked")
+        self.assertEqual(body["database"]["check"], "not_run")
+        self.assertIsNone(body["chunks"])
+        self.assertIn("files", body)
+        self.assertIn("age_seconds", body["index"])
+        self.assertNotIn("vectors", body)
+        availability.assert_called_once()
+
+    def test_healthz_reports_unavailable_database_as_error(self):
+        with patch.object(
+            server,
+            "database_availability",
+            return_value={"status": "error", "integrity": "not_checked", "error": "boom"},
+        ):
+            status, body = self.request("GET", "/healthz")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "error")
+        self.assertEqual(body["database"]["error"], "boom")
+
+    def test_status_still_runs_full_integrity_check(self):
+        with patch.object(
+            server, "verify_database", return_value={"status": "ok", "integrity": "ok"}
+        ) as verify:
+            status, body = self.request("GET", "/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["database"], {"status": "ok", "integrity": "ok"})
+        self.assertIsNotNone(body["chunks"])
+        verify.assert_called_once()
+
     def test_search_returns_results_for_indexed_content(self):
         (Path(self.tmp.name) / "doc.md").write_text("# API\nthe quick brown fox")
         status, body = self.request("POST", "/index")

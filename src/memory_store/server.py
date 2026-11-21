@@ -485,7 +485,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         started = time.monotonic()
         parsed, params = urlparse(self.path), parse_qs(urlparse(self.path).query)
-        if parsed.path in ("/healthz", "/status"):
+        if parsed.path == "/healthz":
+            availability = database_availability(
+                store.db.execute("PRAGMA database_list").fetchone()[2]
+            )
+            return self.send_json(
+                200,
+                {
+                    "status": availability["status"],
+                    "backend": "sqlite+qdrant" if vector_store else "sqlite",
+                    "database": availability,
+                    **store.status(quick=True),
+                },
+            )
+        if parsed.path == "/status":
             integrity = verify_database(store.db.execute("PRAGMA database_list").fetchone()[2])
             status = {
                 "status": integrity["status"],
