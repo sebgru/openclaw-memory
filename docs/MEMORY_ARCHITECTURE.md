@@ -69,9 +69,12 @@ separate from the authoritative tier.
 
 ## Monitoring and recovery
 
-`GET /healthz` runs SQLite's integrity check and returns `status: ok` plus
-database counts, index freshness/error metadata, and Qdrant point/chunk parity;
-a failed check returns `status: error`. Archive status performs the same
+`GET /healthz` is a cheap probe: it checks that the database opens read-only
+and returns `status: ok` plus the file count and index freshness/error metadata
+(chunk counts, FTS parity, vector diagnostics and `integrity_check` are not run);
+an unopenable database returns `status: error`. `GET /status` runs SQLite's
+integrity check and returns database counts, index freshness/error metadata,
+and Qdrant point/chunk parity. Archive status performs the same
 SQLite integrity check for the archive database. For independent
 maintenance, run `python -m memory_store.maintenance verify --source
 memory.db` or `python -m memory_store.maintenance backup --source memory.db
@@ -102,9 +105,9 @@ schedule retries, mutate configuration, or run a background repair process.
 
 An external scheduler may monitor each response's `added`, `changed`,
 `removed`, and `unchanged` counters and treat a non-2xx response or a failed
-`/healthz` integrity check as an alert. Retries should remain explicit and
+`/status` integrity check as an alert. Retries should remain explicit and
 single-owner; do not run overlapping index calls against the same database.
-`GET /status` is an alias of `/healthz` for simple probes. This keeps rebuild
+`GET /healthz` is the lightweight probe for simple liveness checks. This keeps rebuild
 ownership and retention policy outside the service and avoids hidden rebuild
 loops.
 
