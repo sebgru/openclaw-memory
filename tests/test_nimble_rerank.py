@@ -286,6 +286,7 @@ class NimbleUnitTests(unittest.TestCase):
         "NIMBLE_RERANK_TIMEOUT",
         "NIMBLE_RERANK_MAX_CANDIDATES",
         "NIMBLE_RERANK_COOLDOWN",
+        "NIMBLE_RERANK_KEEP_ALIVE",
     )
 
     def setUp(self):
@@ -373,6 +374,23 @@ class NimbleUnitTests(unittest.TestCase):
         self.assertEqual(nimble._cooldown(), nimble.MIN_COOLDOWN)
         os.environ["NIMBLE_RERANK_COOLDOWN"] = "9999"
         self.assertEqual(nimble._cooldown(), nimble.MAX_COOLDOWN)
+
+    def _sent_keep_alive(self):
+        probabilities = {"relevant": 0.9, "not_relevant": 0.1}
+        answer = {"type": "choice", "choice": "relevant", "probabilities": probabilities}
+        ok = json.dumps({"answers": {"relevance": answer}}).encode()
+        with mock.patch.object(
+            nimble.urllib.request, "urlopen", return_value=FakeResponse(body=ok)
+        ) as urlopen:
+            nimble._score(self.ENDPOINT, 1.0, "q", "t")
+        return json.loads(urlopen.call_args.args[0].data)["keep_alive"]
+
+    def test_keep_alive_defaults_to_keep_loaded(self):
+        self.assertEqual(self._sent_keep_alive(), "-1m")
+
+    def test_keep_alive_env_override(self):
+        os.environ["NIMBLE_RERANK_KEEP_ALIVE"] = "10m"
+        self.assertEqual(self._sent_keep_alive(), "10m")
 
     def test_score_rejects_non_200_status(self):
         with (

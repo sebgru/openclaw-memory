@@ -95,7 +95,7 @@ def _score(endpoint, timeout, query, text):
                     },
                 }
             },
-            "keep_alive": "60s",
+            "keep_alive": os.getenv("NIMBLE_RERANK_KEEP_ALIVE", "-1m"),
         }
     ).encode()
     request = urllib.request.Request(
