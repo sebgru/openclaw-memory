@@ -2,14 +2,18 @@
 
 import ipaddress
 import json
+import logging
 import math
 import os
+import re
 import threading
 import time
 import urllib.request
 from urllib.parse import urlparse
 
-LOCAL_HOSTS = {"localhost", "ollama-coder"}
+logger = logging.getLogger(__name__)
+
+LOCAL_HOSTS = {"localhost", "ollama-coder", "ollama-rerank"}
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_TEXT_CHARS = 8_000
 MODEL = "nimble:9b"
@@ -80,6 +84,20 @@ def _probability(payload):
     return float(relevant)
 
 
+def _keep_alive():
+    value = os.getenv("NIMBLE_RERANK_KEEP_ALIVE")
+    if value is None:
+        return "-1m"
+    value = value.strip()
+    if not value:
+        logger.warning("Empty NIMBLE_RERANK_KEEP_ALIVE; using -1m")
+        return "-1m"
+    if re.fullmatch(r"[+-]?[0-9]+", value):
+        logger.warning("Unit-less NIMBLE_RERANK_KEEP_ALIVE; interpreting as seconds")
+        return value + "s"
+    return value
+
+
 def _score(endpoint, timeout, query, text):
     body = json.dumps(
         {
@@ -95,7 +113,7 @@ def _score(endpoint, timeout, query, text):
                     },
                 }
             },
-            "keep_alive": "60s",
+            "keep_alive": _keep_alive(),
         }
     ).encode()
     request = urllib.request.Request(
