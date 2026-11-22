@@ -78,16 +78,15 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 
 ### Compatibility changes, including legacy mode
 
-`legacy` remains the default **ranking** algorithm, but confidence handling has
-intentionally changed in both modes: `low_confidence` is evaluated over the full
-retrieved/fused candidate set before result limits or prompt quotas, rather than
-only the delivered rows. A response whose first row is weak can therefore omit
-`low_confidence` when another retrieved candidate has strong evidence beyond the
-limit. This preserves a query-level evidence signal instead of declaring a weak
-match solely because of truncation; it does not change the confidence floor or
-legacy numeric ranking. Query-log hardening also applies to both modes.
+`legacy` remains the default ranking algorithm and preserves the pre-E.2
+`low_confidence` behaviour: evaluate only the delivered rows, after profile
+filtering/quotas and result truncation. Only `UNIFIED_FUSION_MODE=rrf` evaluates
+confidence over the full fused candidate set before those steps. In RRF a weak
+first row can therefore omit `low_confidence` when a strong candidate lies beyond
+the limit. The confidence floor is unchanged. Query-log hardening applies to
+both modes, including malformed HTTP requests.
 
-Unified responses include `fusion: "legacy"|"rrf"`; `score` is an opaque ordering key and is not comparable across modes. Low confidence is computed before profile quotas and result truncation. Unified search supports an opt-in [rank fusion mode](docs/RANK_FUSION.md). Add
+Unified responses include `fusion: "legacy"|"rrf"`; `score` is an opaque ordering key and is not comparable across modes. Low confidence is computed before profile quotas and result truncation only in RRF mode. Unified search supports an opt-in [rank fusion mode](docs/RANK_FUSION.md). Add
 `debug=1` to return numeric engine, candidate-legacy, pre/post-fusion and post-profile ranks in each result's `fusion_debug`
 field in that mode. Queries and candidate text are not logged by this path.
 
@@ -191,7 +190,7 @@ override to inherit future safe defaults.
 
 ## Logging
 
-The service logs to stdout: startup configuration, HTTP access lines, search outcomes (query, limit, result count, latency), index outcomes (added/changed/removed/unchanged counts), per-file indexer decisions, and errors with tracebacks. `LOG_LEVEL` controls verbosity (`INFO` by default; set `DEBUG` to also log unchanged files during indexing). Semantic-search failures that fall back to FTS5 are logged as warnings and, on `/unified/search`, surfaced in `warnings`.
+The service logs to stdout: startup configuration, HTTP access lines (without query strings), search outcomes (limit, result count, latency), index outcomes (added/changed/removed/unchanged counts), per-file indexer decisions, and errors with tracebacks. `LOG_LEVEL` controls verbosity (`INFO` by default; set `DEBUG` to also log unchanged files during indexing). Malformed HTTP requests log a generic rejection without raw request text. Semantic-search failures that fall back to FTS5 are logged as warnings and, on `/unified/search`, surfaced in `warnings`.
 
 When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale. `/status` exposes full parity diagnostics; routine `/documents/status` and `/archive/status` use sampled vector diagnostics and omit expensive whole-database integrity, chunk-count, and FTS-parity scans (`integrity: not_checked`, chunk/parity fields are null or marked sampled). The smaller file count remains exact. Run the explicit database `verify` command for a full integrity check. Use the explicit, locked reconciliation endpoint to add missing points; it never deletes points. Search falls back to SQLite FTS5 during a Qdrant or embedding outage. `/unified/search` reports this per source as a warning (coverage stays `searched`).
 

@@ -386,10 +386,65 @@ class RankFusionTests(unittest.TestCase):
                         connection.close()
                     self.assertEqual(response.status, 500 if mode == "mistyped" else 200)
                     if mode != "mistyped":
-                        self.assertNotIn("low_confidence", payload)
+                        self.assertEqual(payload.get("low_confidence", False), mode == "legacy")
                         self.assertEqual(payload["fusion"], mode)
                         if mode == "legacy":
                             self.assertNotIn("fusion_debug", payload["results"][0])
+        finally:
+            http.shutdown()
+            http.server_close()
+
+    def test_legacy_default_confidence_matches_main_7f6e316_delivered_rows(self):
+        # Main 7f6e316 evaluates the final HTTP results, not hidden candidates.
+        # Pin its predicate independently so a shared helper regression is visible.
+        def main_low_confidence(rows):
+            return bool(rows) and all(
+                "semantic_similarity" in row
+                and row.get("lexical_evidence", 0) <= 0
+                and not row.get("exact_match")
+                and row["semantic_similarity"] < server.LOW_CONFIDENCE_SEMANTIC_FLOOR
+                for row in rows
+            )
+
+        weak = hit("weak", semantic_similarity=0.1, lexical_evidence=0)
+        strong = hit("strong", semantic_similarity=0.9, lexical_evidence=2)
+        cases = (
+            ([weak, strong], "tool", True),
+            ([weak, strong], "prompt", False),  # profile filters both rows
+            ([], "tool", False),
+            ([hit("unknown")], "tool", True),  # legacy merge fills missing evidence with zero
+            ([{**weak, "exact_match": True}], "tool", False),
+            (
+                [{**weak, "semantic_similarity": server.LOW_CONFIDENCE_SEMANTIC_FLOOR}],
+                "tool",
+                False,
+            ),
+        )
+        http = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        Thread(target=http.serve_forever, daemon=True).start()
+        try:
+            for mode in (None, "legacy"):
+                for rows, profile, expected in cases:
+                    with (
+                        self.subTest(mode=mode, profile=profile, rows=rows),
+                        patch.dict(os.environ),
+                        patch.object(server, "hybrid_search", return_value=rows),
+                        patch.object(server, "nimble_rerank", side_effect=lambda q, rows: rows),
+                    ):
+                        if mode is None:
+                            os.environ.pop("UNIFIED_FUSION_MODE", None)
+                        else:
+                            os.environ["UNIFIED_FUSION_MODE"] = mode
+                        connection = HTTPConnection(*http.server_address)
+                        connection.request(
+                            "GET", f"/unified/search?q=topic&scope=main&limit=1&profile={profile}"
+                        )
+                        response = connection.getresponse()
+                        payload = json.loads(response.read())
+                        connection.close()
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(main_low_confidence(payload["results"]), expected)
+                        self.assertEqual(payload.get("low_confidence", False), expected)
         finally:
             http.shutdown()
             http.server_close()

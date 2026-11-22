@@ -580,7 +580,8 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool", *, d
     else:
         results = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
         results = nimble_rerank(query, results)
-    _search_state.low_confidence = is_low_confidence(results)
+    # Legacy/main evaluates only delivered rows; RRF keeps query-level evidence.
+    _search_state.low_confidence = is_low_confidence(results) if mode == "rrf" else None
     selected = apply_search_profile(results, limit, profile)
     for rank, item in enumerate(selected, 1):
         if debug and "fusion_debug" in item:
@@ -803,6 +804,7 @@ class Handler(BaseHTTPRequestHandler):
                     else unified_search_with_coverage(query, limit, scope, profile, debug=debug)
                 )
             except ValueError:
+                logger.warning("invalid unified search configuration")
                 return self.send_json(500, {"error": "invalid unified search configuration"})
             except LookupError as exc:
                 return self.send_json(404, {"error": str(exc)})
@@ -926,7 +928,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_request(self, code="-", size="-"):
         # BaseHTTPRequestHandler otherwise logs the complete request/query.
-        logger.info("%s %s status=%s size=%s", self.command, urlparse(self.path).path, code, size)
+        # Malformed request lines can reach this before path/command are set.
+        path = getattr(self, "path", "").split("?", 1)[0]
+        logger.info("http path=%s status=%s size=%s", path, code, size)
+
+    def log_error(self, format, *args):
+        # Parser errors interpolate the raw request line, including query secrets.
+        logger.warning("http request rejected")
 
     def log_message(self, format, *args):
         logger.info("%s - %s", self.address_string(), format % args)

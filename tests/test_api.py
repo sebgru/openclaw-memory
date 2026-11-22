@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import sys
 import unittest
 from pathlib import Path
@@ -38,6 +39,28 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.request("/search"), 400)
         self.assertEqual(self.request("/search?q=x&limit=no"), 400)
         self.assertEqual(self.request("/status"), 200)
+
+    def test_malformed_requests_return_errors_without_logging_query(self):
+        cases = (
+            (b"GET /unified/search?q=SECRETQUERY HTTP/9.9 extra junk", 400),
+            (b"GET /unified/search?q=SECRETQUERY HTTP/invalid", 400),
+            (b"/unified/search?q=SECRETQUERY", 400),
+            (b"GET /unified/search?q=SECRETQUERY" + b"x" * 65536, 414),
+        )
+        for line, status in cases:
+            with self.subTest(status=status, length=len(line)):
+                with (
+                    self.assertLogs("memory_store", level="INFO") as logs,
+                    socket.create_connection(self.http.server_address, timeout=5) as connection,
+                ):
+                    connection.sendall(line + b"\r\n\r\n")
+                    response = b""
+                    while chunk := connection.recv(65536):
+                        response += chunk
+                # HTTP/0.9 malformed lines receive an HTML error without headers.
+                self.assertIn(f"Error code: {status}".encode(), response)
+                self.assertNotIn("SECRETQUERY", "\n".join(logs.output))
+                self.assertIn("http request rejected", "\n".join(logs.output))
 
     def test_search_exposes_separate_hybrid_scores(self):
         original = server.store.search

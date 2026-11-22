@@ -101,12 +101,14 @@ hashes:
 - `post_fusion_rank`: before profile/limit; `post_profile_rank`: contiguous rank
   in the delivered list (the first may have gaps, the second does not).
 
-Confidence uses evidence fields, never rank scores, and is captured before
-profile filtering/truncation. Empty-result behaviour is unchanged. The tuple
-library API is unchanged; the HTTP layer consumes request-thread confidence.
+Confidence uses evidence fields, never rank scores. In RRF it is captured before
+profile filtering/truncation; legacy/default mode preserves main (pre-E.2)
+semantics by evaluating only the delivered rows after those steps. Empty-result
+behaviour is unchanged. The tuple library API is unchanged; the HTTP layer
+consumes request-thread confidence only in RRF mode.
 
 Privacy hardening is intentionally shared by legacy and RRF: HTTP access logs
-omit query strings, and unified **and scope-specific** timing logs omit queries.
+omit query strings (malformed requests log only a generic rejection), and unified **and scope-specific** timing logs omit queries.
 Embedding retries/fallback and unified backend failures omit exception content.
 This does not promise redaction of arbitrary failures elsewhere in the service;
 result provenance remains private response data, not log data.
