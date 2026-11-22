@@ -19,6 +19,14 @@ FUZZY_MAX_CANDIDATES = 20
 FUZZY_MAX_TOKENS = 4
 FUZZY_SCAN_LIMIT = 200
 
+# Nullable per-chunk columns added to ``chunks`` for document ranking metadata.
+DOC_METADATA_COLUMNS = (
+    ("doc_date", "TEXT"),
+    ("category", "TEXT"),
+    ("ocr_quality", "REAL"),
+    ("language", "TEXT"),
+)
+
 
 def _fold(text):
     """Casefold and strip diacritics (ß -> ss) for typo comparison."""
@@ -67,9 +75,12 @@ class SQLiteStore:
         dimensions: int = 128,
         read_timeout: float | None = None,
         enable_fuzzy: bool = True,
+        doc_metadata: bool = False,
     ):
+        """``doc_metadata`` adds the ranking-metadata columns to ``chunks`` (documents DB only)."""
         self.path = str(path)
         self.enable_fuzzy = enable_fuzzy
+        self.doc_metadata = doc_metadata
         # Upper bound on how long a search waits for a file lock held by a
         # long-running writer before failing fast with ``OperationalError``.
         self.read_timeout = _default_read_timeout() if read_timeout is None else read_timeout
@@ -94,7 +105,22 @@ class SQLiteStore:
         """)
         if self.enable_fuzzy:
             self._ensure_trigram_index()
+        if self.doc_metadata:
+            self._migrate_document_metadata()
         self.db.commit()
+
+    def _migrate_document_metadata(self):
+        """Add the metadata columns and a path index; idempotent and data-preserving.
+
+        ``ALTER TABLE ... ADD COLUMN`` leaves every existing row and value intact (new
+        columns read as NULL until the file is re-indexed), so no data is rewritten.
+        """
+        with self._write_lock, self.db:
+            existing = {row[1] for row in self.db.execute("PRAGMA table_info(chunks)")}
+            for name, kind in DOC_METADATA_COLUMNS:
+                if name not in existing:
+                    self.db.execute(f"ALTER TABLE chunks ADD COLUMN {name} {kind}")
+            self.db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path)")
 
     def _ensure_trigram_index(self):
         """Create and one-time backfill the trigram index.
@@ -151,21 +177,9 @@ class SQLiteStore:
                 vector = (embed or (lambda text: hash_embedding(text, self.dimensions)))(
                     f"{heading} {body}"
                 )
-                vec = ",".join(map(str, vector))
-                self.db.execute(
-                    "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
-                    (chunk_id, path, heading, body, line, vec),
-                )
-                self.db.execute(
-                    "INSERT INTO chunks_fts VALUES (?,?,?,?)", (chunk_id, path, heading, body)
-                )
-                if self.enable_fuzzy:
-                    self.db.execute(
-                        "INSERT INTO chunks_trigram VALUES (?,?,?,?)",
-                        (chunk_id, path, heading, body),
-                    )
+                self._insert_chunk(chunk_id, path, heading, body, line, vector)
 
-    def upsert_file_precomputed(self, path, digest, chunks):
+    def upsert_file_precomputed(self, path, digest, chunks, metadata=None):
         """Atomically replace a file using already-computed vectors.
 
         The whole replacement runs under ``self._write_lock`` and commits via
@@ -174,25 +188,57 @@ class SQLiteStore:
         ``BEGIN``/``COMMIT`` form could surface ``cannot commit - no
         transaction is active`` when a concurrent request committed the shared
         connection between the last insert and the commit.
+
+        ``metadata`` optionally maps chunk id to ``doc_date``/``category``/
+        ``ocr_quality``/``language`` (stored when ``doc_metadata`` is enabled) and an
+        optional ``header`` that is indexed in the FTS ``heading`` column only; the
+        stored ``chunks`` row (what search returns) is never altered by it.
         """
+        metadata = metadata or {}
         with self._write_lock, self.db:
             self._delete_file_no_commit(path)
             self.db.execute("INSERT INTO files VALUES (?,?)", (path, digest))
             for chunk_id, heading, body, line, vector in chunks:
-                vec = ",".join(map(str, vector))
-                self.db.execute(
-                    "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
-                    (chunk_id, path, heading, body, line, vec),
+                self._insert_chunk(
+                    chunk_id, path, heading, body, line, vector, metadata.get(chunk_id)
                 )
-                self.db.execute(
-                    "INSERT INTO chunks_fts VALUES (?,?,?,?)",
-                    (chunk_id, path, heading, body),
-                )
-                if self.enable_fuzzy:
-                    self.db.execute(
-                        "INSERT INTO chunks_trigram VALUES (?,?,?,?)",
-                        (chunk_id, path, heading, body),
-                    )
+
+    def _insert_chunk(self, chunk_id, path, heading, body, line, vector, meta=None):
+        """Insert one chunk row plus its FTS rows; the caller owns the transaction."""
+        vec = ",".join(map(str, vector))
+        meta = meta or {}
+        if self.doc_metadata:
+            self.db.execute(
+                "INSERT INTO chunks (id, path, heading, body, line, vector, "
+                "doc_date, category, ocr_quality, language) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    chunk_id,
+                    path,
+                    heading,
+                    body,
+                    line,
+                    vec,
+                    meta.get("doc_date"),
+                    meta.get("category"),
+                    meta.get("ocr_quality"),
+                    meta.get("language"),
+                ),
+            )
+        else:
+            self.db.execute(
+                "INSERT INTO chunks (id, path, heading, body, line, vector) VALUES (?,?,?,?,?,?)",
+                (chunk_id, path, heading, body, line, vec),
+            )
+        header = meta.get("header")
+        fts_heading = f"{header} {heading}" if header else heading
+        self.db.execute(
+            "INSERT INTO chunks_fts VALUES (?,?,?,?)", (chunk_id, path, fts_heading, body)
+        )
+        if self.enable_fuzzy:
+            self.db.execute(
+                "INSERT INTO chunks_trigram VALUES (?,?,?,?)",
+                (chunk_id, path, fts_heading, body),
+            )
 
     def _delete_file_no_commit(self, path):
         """Delete *path*'s rows; the caller owns the surrounding transaction."""
@@ -288,6 +334,32 @@ class SQLiteStore:
             }
             for row in rows
         ]
+
+    def attach_metadata(self, results):
+        """Return *results* with stored document metadata added to rows that have it.
+
+        Lexical and semantic hits are matched on ``(path, text)``; rows indexed before
+        the metadata columns existed carry NULLs and are returned unchanged.
+        """
+        if not self.doc_metadata or not results:
+            return results
+        paths = sorted({str(item.get("path", "")) for item in results})
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT path, body, doc_date, category, ocr_quality, language FROM chunks "
+                f"WHERE category IS NOT NULL AND path IN ({','.join('?' * len(paths))})",
+                paths,
+            ).fetchall()
+        found = {
+            (row["path"], row["body"]): {
+                "doc_date": row["doc_date"],
+                "category": row["category"],
+                "ocr_quality": row["ocr_quality"],
+                "language": row["language"],
+            }
+            for row in rows
+        }
+        return [{**item, **found.get((item.get("path"), item.get("text")), {})} for item in results]
 
     def close(self):
         self.db.close()

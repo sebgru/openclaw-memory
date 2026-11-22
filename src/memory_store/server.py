@@ -9,6 +9,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .doc_metadata import DEFAULT_FRONTMATTER_DATE_KEYS
 from .document_indexer import DocumentIndexer, IndexBusyError
 from .embeddings import EmbeddingClient
 from .indexer import Indexer
@@ -74,7 +75,12 @@ archive_vector_store = (
     else None
 )
 documents_store = (
-    SQLiteStore(os.getenv("DOCUMENTS_SQLITE_PATH", "documents.db"), DIM, enable_fuzzy=False)
+    SQLiteStore(
+        os.getenv("DOCUMENTS_SQLITE_PATH", "documents.db"),
+        DIM,
+        enable_fuzzy=False,
+        doc_metadata=True,
+    )
     if DOCUMENTS_ROOT
     else None
 )
@@ -89,6 +95,22 @@ documents_vector_store = (
 )
 DOCUMENTS_INCLUDE_PATTERNS = patterns("DOCUMENTS_INCLUDE_PATTERNS", "**/*.md")
 DOCUMENTS_EXCLUDE_PATTERNS = patterns("DOCUMENTS_EXCLUDE_PATTERNS", "")
+# Default OFF: prepend "title | date | category" to document text before embedding/FTS.
+# Only affects files indexed afterwards; see README "Document metadata" for the re-index.
+DOCUMENTS_CONTEXT_HEADER = os.getenv("DOCUMENTS_CONTEXT_HEADER", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+DOCUMENTS_DATE_FRONTMATTER_KEYS = (
+    tuple(
+        k.strip().casefold()
+        for k in os.getenv("DOCUMENTS_DATE_FRONTMATTER_KEYS", "").split(",")
+        if k.strip()
+    )
+    or DEFAULT_FRONTMATTER_DATE_KEYS
+)
 
 
 _DEFAULT_VECTOR = object()
@@ -237,10 +259,14 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         bonus, exact = exact_match_bonus(query, item, item.get("fuzzy_terms", []))
         item["exact_match"] = exact
         item["score"] += bonus
-    return [
+    results = [
         annotate_result(item)
         for item in sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
     ]
+    # Stores without document metadata (main/archive, test doubles) return results unchanged.
+    if hasattr(selected_store, "attach_metadata"):
+        results = selected_store.attach_metadata(results)
+    return results
 
 
 def indexer(root, selected_store, selected_vector_store, includes=("**/*.md",), excludes=()):
@@ -758,14 +784,25 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 max_files = int(payload.get("max_files", 250))
-                stats = DocumentIndexer(
+                reindex = payload.get("reindex", False)
+                if not isinstance(reindex, bool):
+                    raise ValueError("reindex must be a boolean")
+                document_indexer = DocumentIndexer(
                     DOCUMENTS_ROOT,
                     documents_store,
                     documents_vector_store,
                     embedder.embed,
                     include_patterns=DOCUMENTS_INCLUDE_PATTERNS,
                     exclude_patterns=DOCUMENTS_EXCLUDE_PATTERNS,
-                ).scan(max_files=max_files)
+                    context_header=DOCUMENTS_CONTEXT_HEADER,
+                    frontmatter_date_keys=DOCUMENTS_DATE_FRONTMATTER_KEYS,
+                )
+                # Keep the long-standing call shape unless a re-index is requested.
+                stats = (
+                    document_indexer.scan(max_files=max_files, reindex=True)
+                    if reindex
+                    else document_indexer.scan(max_files=max_files)
+                )
                 logger.info("%s %s", self.path, stats.as_dict())
                 return self.send_json(200, stats.as_dict())
             except IndexBusyError as exc:
