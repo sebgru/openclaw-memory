@@ -1,0 +1,1278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "principal",
+    "facts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "personal-facts.v2"
+    },
+    "principal": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{1,31}$"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Entity"
+      },
+      "uniqueItems": true
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Fact"
+      }
+    },
+    "tombstones": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RetractionTombstone"
+      }
+    }
+  },
+  "$defs": {
+    "EntityId": {
+      "type": "string",
+      "pattern": "^(person|household|property|vehicle|organization|account|policy|device|school|pet):[a-z0-9][a-z0-9_.-]{0,63}$"
+    },
+    "Entity": {
+      "type": "object",
+      "required": [
+        "id",
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/EntityId"
+        },
+        "type": {
+          "enum": [
+            "person",
+            "household",
+            "property",
+            "vehicle",
+            "organization",
+            "account",
+            "policy",
+            "device",
+            "school",
+            "pet"
+          ]
+        },
+        "display_name": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 120
+          }
+        }
+      }
+    },
+    "Date": {
+      "type": "string",
+      "format": "date"
+    },
+    "DateOrDateTime": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "type": "string",
+          "format": "date-time"
+        }
+      ]
+    },
+    "PrivacyClass": {
+      "enum": [
+        "shareable",
+        "personal",
+        "family",
+        "health",
+        "financial",
+        "identity",
+        "employment",
+        "restricted"
+      ]
+    },
+    "SourceClass": {
+      "enum": [
+        "owner_stated",
+        "conversation",
+        "document",
+        "mail"
+      ]
+    },
+    "Status": {
+      "enum": [
+        "candidate",
+        "current",
+        "superseded",
+        "conflict",
+        "retracted"
+      ]
+    },
+    "Provenance": {
+      "type": "object",
+      "required": [
+        "kind",
+        "ref",
+        "evidence_date"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "curated_file",
+            "session",
+            "document",
+            "mail",
+            "structured_log"
+          ]
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "locator": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "evidence_date": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DateOrDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ocr_quality": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "extractor": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "mail"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "ref": {
+                "pattern": "^mh_[a-f0-9]{64}$",
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Confirmation": {
+      "type": "object",
+      "required": [
+        "by",
+        "at",
+        "session_ref"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "by": {
+          "const": "owner"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "session_ref": {
+          "type": "string"
+        }
+      }
+    },
+    "FactValue": {
+      "oneOf": [
+        {
+          "type": "string",
+          "maxLength": 1000
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "object",
+          "maxProperties": 16
+        }
+      ]
+    },
+    "Fact": {
+      "type": "object",
+      "required": [
+        "fact_id",
+        "subject",
+        "predicate",
+        "value",
+        "value_type",
+        "status",
+        "source_class",
+        "provenance",
+        "confidence",
+        "privacy_class",
+        "recorded_at",
+        "valid_from",
+        "valid_to",
+        "last_verified",
+        "unit"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fact_id": {
+          "type": "string",
+          "pattern": "^f_[a-z0-9]{8,32}$"
+        },
+        "subject": {
+          "$ref": "#/$defs/EntityId"
+        },
+        "predicate": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$",
+          "not": {
+            "pattern": "^(credential|secret|password|token|key)\\.",
+            "type": "string"
+          }
+        },
+        "item_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "value": {
+          "$ref": "#/$defs/FactValue"
+        },
+        "value_type": {
+          "enum": [
+            "string",
+            "quantity",
+            "boolean",
+            "date",
+            "address",
+            "entity_ref",
+            "structured"
+          ]
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 16
+        },
+        "valid_from": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DateOrDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "valid_to": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DateOrDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time_precision": {
+          "enum": [
+            "day",
+            "month",
+            "year",
+            "unknown"
+          ],
+          "default": "day"
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "last_verified": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DateOrDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "source_class": {
+          "$ref": "#/$defs/SourceClass"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Provenance"
+          },
+          "maxItems": 20
+        },
+        "confirmation": {
+          "$ref": "#/$defs/Confirmation"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "privacy_class": {
+          "$ref": "#/$defs/PrivacyClass"
+        },
+        "supersedes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^f_[a-z0-9]{8,32}$"
+          },
+          "uniqueItems": true
+        },
+        "superseded_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^f_[a-z0-9]{8,32}$"
+        },
+        "conflicts_with": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^f_[a-z0-9]{8,32}$"
+          },
+          "uniqueItems": true
+        },
+        "retraction": {
+          "type": "object",
+          "required": [
+            "reason",
+            "at"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "enum": [
+                "owner_corrected",
+                "extraction_error",
+                "wrong_subject",
+                "duplicate",
+                "owner_forget"
+              ]
+            },
+            "at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "suppress_source": {
+              "type": "boolean"
+            }
+          }
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 300
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "source_class": {
+                "const": "owner_stated"
+              }
+            },
+            "required": [
+              "source_class"
+            ]
+          },
+          "then": {
+            "required": [
+              "confirmation"
+            ],
+            "properties": {
+              "confidence": {
+                "type": "number",
+                "minimum": 0.9
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "current"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_class": {
+                "const": "owner_stated"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "superseded"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "superseded_by"
+            ],
+            "properties": {
+              "valid_to": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "superseded_by": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "conflict"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "conflicts_with"
+            ],
+            "properties": {
+              "conflicts_with": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "retracted"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "retraction"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "quantity"
+              }
+            },
+            "required": [
+              "value_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "number"
+              },
+              "unit": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "unit"
+            ]
+          },
+          "else": {
+            "properties": {
+              "unit": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "boolean"
+              }
+            },
+            "required": [
+              "value_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "enum": [
+                  "address",
+                  "structured"
+                ]
+              }
+            },
+            "required": [
+              "value_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "enum": [
+                  "string",
+                  "date",
+                  "entity_ref"
+                ]
+              }
+            },
+            "required": [
+              "value_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "source_class": {
+                "const": "mail"
+              }
+            },
+            "required": [
+              "source_class"
+            ]
+          },
+          "then": {
+            "properties": {
+              "provenance": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "mail"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "source_class": {
+                "const": "document"
+              }
+            },
+            "required": [
+              "source_class"
+            ]
+          },
+          "then": {
+            "properties": {
+              "provenance": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "document"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "source_class": {
+                "const": "conversation"
+              }
+            },
+            "required": [
+              "source_class"
+            ]
+          },
+          "then": {
+            "properties": {
+              "provenance": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "session",
+                      "structured_log"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "date"
+              }
+            },
+            "required": [
+              "value_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "string",
+                "format": "date"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "entity_ref"
+              }
+            },
+            "required": [
+              "value_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/EntityId"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "predicate": {
+                "pattern": "^(health|body)\\.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "predicate"
+            ]
+          },
+          "then": {
+            "properties": {
+              "privacy_class": {
+                "enum": [
+                  "health",
+                  "restricted"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "predicate": {
+                "pattern": "^family\\.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "predicate"
+            ]
+          },
+          "then": {
+            "properties": {
+              "privacy_class": {
+                "enum": [
+                  "family",
+                  "restricted"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "privacy_class": {
+                "const": "shareable"
+              }
+            },
+            "required": [
+              "privacy_class"
+            ]
+          },
+          "then": {
+            "properties": {
+              "predicate": {
+                "enum": [
+                  "pref.language",
+                  "pref.timezone"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "PredicateDefinition": {
+      "type": "object",
+      "required": [
+        "predicate",
+        "temporal_class",
+        "value_type",
+        "default_privacy_class",
+        "always_on"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "predicate": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+        },
+        "temporal_class": {
+          "enum": [
+            "static",
+            "state",
+            "set",
+            "series",
+            "derived"
+          ]
+        },
+        "value_type": {
+          "enum": [
+            "string",
+            "quantity",
+            "boolean",
+            "date",
+            "address",
+            "entity_ref",
+            "structured"
+          ]
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "default_privacy_class": {
+          "$ref": "#/$defs/PrivacyClass"
+        },
+        "always_on": {
+          "type": "boolean"
+        },
+        "max_age_days": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "volatile": {
+          "type": "boolean",
+          "default": false
+        },
+        "derive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "inputs"
+          ],
+          "properties": {
+            "op": {
+              "enum": [
+                "age_years",
+                "age_months",
+                "years_since",
+                "days_until_anniversary"
+              ]
+            },
+            "inputs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          }
+        },
+        "topic_triggers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "aliases": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "en": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "de": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "ru": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "curated_home": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "temporal_class": {
+                "const": "derived"
+              }
+            },
+            "required": [
+              "temporal_class"
+            ]
+          },
+          "then": {
+            "required": [
+              "derive"
+            ]
+          }
+        }
+      ]
+    },
+    "CaptureDraft": {
+      "type": "object",
+      "required": [
+        "draft_id",
+        "action",
+        "subject",
+        "predicate",
+        "value",
+        "privacy_class",
+        "origin",
+        "expires_at",
+        "value_type",
+        "unit",
+        "valid_from",
+        "will_supersede"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "draft_id": {
+          "type": "string",
+          "pattern": "^d_[a-z0-9]{8,32}$"
+        },
+        "action": {
+          "enum": [
+            "add",
+            "replace",
+            "end",
+            "retract"
+          ]
+        },
+        "subject": {
+          "$ref": "#/$defs/EntityId"
+        },
+        "predicate": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+        },
+        "item_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/FactValue"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid_from": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DateOrDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "privacy_class": {
+          "$ref": "#/$defs/PrivacyClass"
+        },
+        "will_supersede": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^f_[a-z0-9]{8,32}$"
+          }
+        },
+        "curated_file_diff_needed": {
+          "type": "boolean"
+        },
+        "origin": {
+          "type": "object",
+          "required": [
+            "session_ref",
+            "audience"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "session_ref": {
+              "type": "string"
+            },
+            "audience": {
+              "const": "owner_private"
+            }
+          }
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "value_type": {
+          "enum": [
+            "string",
+            "quantity",
+            "boolean",
+            "date",
+            "address",
+            "entity_ref",
+            "structured"
+          ]
+        },
+        "valid_to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DateOrDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_fact_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^f_[a-z0-9]{8,32}$"
+          },
+          "uniqueItems": true
+        },
+        "time_precision": {
+          "enum": [
+            "day",
+            "month",
+            "year",
+            "unknown"
+          ],
+          "default": "day"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "end",
+                  "retract"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "target_fact_ids"
+            ],
+            "properties": {
+              "target_fact_ids": {
+                "minItems": 1,
+                "type": "array"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "end"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "valid_to"
+            ],
+            "properties": {
+              "valid_to": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ResolvedFact": {
+      "type": "object",
+      "required": [
+        "subject",
+        "predicate",
+        "state",
+        "disclosures"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "subject": {
+          "$ref": "#/$defs/EntityId"
+        },
+        "predicate": {
+          "type": "string"
+        },
+        "item_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "as_of": {
+          "$ref": "#/$defs/DateOrDateTime"
+        },
+        "state": {
+          "enum": [
+            "resolved",
+            "resolved_stale",
+            "conflict",
+            "unverified_only",
+            "not_found",
+            "unavailable"
+          ]
+        },
+        "current": {
+          "$ref": "#/$defs/Fact"
+        },
+        "derived_value": {
+          "$ref": "#/$defs/FactValue"
+        },
+        "alternatives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Fact"
+          }
+        },
+        "historical": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Fact"
+          }
+        },
+        "disclosures": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "unreviewed",
+              "stale",
+              "conflict",
+              "mail_only",
+              "derived",
+              "low_confidence",
+              "partial_lane_unavailable",
+              "unknown_source_date",
+              "uncertain_validity",
+              "noncurrent_claim",
+              "historical",
+              "blocked_audience"
+            ]
+          }
+        },
+        "source_rank": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "source_tier": {
+          "enum": [
+            "T0_curated",
+            "T1_recent",
+            "document_newer",
+            "document_older",
+            "mail"
+          ]
+        },
+        "derived_from": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^f_[a-z0-9]{8,32}$"
+          }
+        },
+        "derived_privacy_class": {
+          "$ref": "#/$defs/PrivacyClass"
+        }
+      }
+    },
+    "RetractionTombstone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact_id",
+        "reason",
+        "at"
+      ],
+      "properties": {
+        "fact_id": {
+          "type": "string",
+          "pattern": "^f_[a-z0-9]{8,32}$"
+        },
+        "reason": {
+          "enum": [
+            "owner_forget",
+            "wrong_subject",
+            "extraction_error"
+          ]
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "suppression_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}
