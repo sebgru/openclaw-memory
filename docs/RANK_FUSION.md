@@ -18,7 +18,11 @@ Other search endpoints retain their legacy numeric scoring contract.
    `bonus/(60+1)`. Vector similarity is retained only as confidence evidence.
 3. Group duplicates **before** Nimble. Interleave canonical scope ranks for its
    tier-agnostic bounded prefix, skipping groups already selected. Make one
-   bounded call and use its order within each scope. Original members remain
+   bounded call. If its order is unchanged (including disabled/fallback), keep
+   the original lane ranks exactly and reuse the first fusion result. Otherwise
+   reorder moved groups only among their own members/slots in each lane, leaving
+   unaffected members in their original order. Explicit member-to-group mapping
+   includes transitive identity bridges. Original members remain
    available for final evidence/provenance aggregation.
 4. For a group with best rank `r_s` in scope `s`, final score is:
    `sum_s 1/(60 + r_s + tier_offset - metadata_bonus + copy_offset)`.
@@ -118,3 +122,30 @@ and without Nimble). A candidate-limited reconstruction from saved responses is
 only diagnostic: it exercises actual within-scope code but cannot recover
 missing engine candidates or original rank gaps, establish owner relevance, or
 measure service/Nimble latency. It is not production activation approval.
+
+
+## Known full-depth design limit
+
+The tier offset is evidence-blind: it does not vanish for an exact/lexical
+match. With 300 weak main neighbours, 300 recent-archive neighbours and a rank-1
+exact document, that document reaches overall **rank 10**, not rank 1. A
+full-depth synthetic regression records this current policy limitation, not a
+relevance acceptance criterion. Exact-match promotion still applies *within*
+the document lane; cross-scope rank fusion discards its absolute magnitude.
+Possible evidence-aware offsets or label-driven retuning require a separate
+ranking decision and evaluation before default promotion. Compressed candidate
+replays cannot validate this full-depth behaviour.
+
+## Full-depth implementation overhead
+
+A synthetic in-process profile (3 lanes x 300 candidates, tool limit 100, mocked
+retrieval, Nimble disabled, 25 calls per mode) measured RRF median **51.34 ms**
+before the lane-rank fix/cache optimization versus **18.99 ms** afterwards;
+legacy medians were **3.18 / 2.69 ms** respectively. This is still roughly 7x
+legacy's fusion-path overhead, not a service latency measurement. It excludes
+network, embedding and retrieval latency; enabled Nimble can require a second
+fusion after an actual reorder. Identities are now computed once per original
+row and reused, candidate-legacy debug sorting is debug-only, and unchanged
+Nimble results reuse the first fused grouping. Profile scripts/results stay in
+the private task outputs, with synthetic fixtures only. No production latency
+claim or default-promotion approval follows.

@@ -394,6 +394,95 @@ class RankFusionTests(unittest.TestCase):
             http.shutdown()
             http.server_close()
 
+    def test_noop_nimble_preserves_deep_cross_lane_duplicate_ranks(self):
+        text = "Synthetic shared session evidence for cross-lane rank preservation. " * 3
+        main, archive = object(), object()
+        duplicate = hit("sessions/shared", text=text)
+        archived = hit("copies/shared", text=text)
+        for main_rank, archive_rank in ((50, 1), (1, 8)):
+            main_rows = [hit(f"m{i}") for i in range(1, main_rank)] + [duplicate]
+            archive_rows = [hit(f"a{i}") for i in range(1, archive_rank)] + [archived]
+
+            def hybrid(
+                query, limit, selected, vector, main_rows=main_rows, archive_rows=archive_rows
+            ):
+                return main_rows if selected is main else archive_rows
+
+            with (
+                patch.dict(os.environ, {"UNIFIED_FUSION_MODE": "rrf", "NIMBLE_RERANK_URL": ""}),
+                patch.object(server, "store", main),
+                patch.object(server, "archive_store", archive),
+                patch.object(server, "documents_store", None),
+                patch.object(server, "hybrid_search", side_effect=hybrid),
+            ):
+                rows, *_ = server.unified_search_with_coverage("synthetic", 100, debug=True)
+            shared = next(row for row in rows if row["path"] == duplicate["path"])
+            self.assertEqual(
+                shared["fusion_debug"]["scope_ranks"], {"main": main_rank, "archive": archive_rank}
+            )
+            self.assertAlmostEqual(shared["score"], 1 / (61 + main_rank) + 1 / (61 + archive_rank))
+
+    def test_other_lane_rerank_cannot_promote_deep_duplicate(self):
+        text = "Synthetic cross-lane duplicate whose main rank must remain deep. " * 3
+        main, archive = object(), object()
+        main_rows = [hit(f"m{i}") for i in range(49)] + [hit("sessions/shared", text=text)]
+        archive_rows = [hit("a1"), hit("copies/shared", text=text), hit("a3")]
+
+        def rerank(query, rows):
+            rows = list(rows)
+            positions = [i for i, row in enumerate(rows) if row["path"] in {"a1.md", "a3.md"}]
+            rows[positions[0]], rows[positions[1]] = rows[positions[1]], rows[positions[0]]
+            return rows
+
+        with (
+            patch.dict(os.environ, {"UNIFIED_FUSION_MODE": "rrf"}),
+            patch.object(server, "store", main),
+            patch.object(server, "archive_store", archive),
+            patch.object(server, "documents_store", None),
+            patch.object(
+                server,
+                "hybrid_search",
+                side_effect=lambda q, n, selected, v: (
+                    main_rows if selected is main else archive_rows
+                ),
+            ),
+            patch.object(server, "nimble_rerank", side_effect=rerank),
+        ):
+            rows, *_ = server.unified_search_with_coverage("synthetic", 100, debug=True)
+        shared = next(row for row in rows if row["path"] == "sessions/shared.md")
+        self.assertEqual(shared["fusion_debug"]["scope_ranks"], {"main": 50, "archive": 2})
+        first_archive = next(row for row in rows if row["path"] == "a3.md")
+        self.assertEqual(first_archive["fusion_debug"]["scope_ranks"], {"archive": 1})
+
+    def test_rerank_explicitly_maps_transitive_group_members(self):
+        # a and b connect only through bridge; b has no key in canonical a.
+        rows = [
+            hit("a", text="shared", content_hash="digest"),
+            hit("middle"),
+            hit("b", text="shared"),
+            hit("bridge", path="b.md", text="shared", content_hash="digest"),
+        ]
+        with (
+            patch.dict(os.environ, {"UNIFIED_FUSION_MODE": "rrf"}),
+            patch.object(server, "hybrid_search", return_value=rows),
+            patch.object(server, "nimble_rerank", side_effect=lambda q, rows: list(reversed(rows))),
+        ):
+            results, *_ = server.unified_search_with_coverage("synthetic", 100, "main", debug=True)
+        group = next(row for row in results if row["path"] == "a.md")
+        self.assertEqual(group["fusion_debug"]["scope_ranks"], {"main": 2})
+        self.assertEqual(group["fusion_debug"]["duplicates_collapsed"], 2)
+
+    def test_full_depth_exact_document_exposes_evidence_blind_prior_limit(self):
+        # Deliberate known design limit, not an expected relevance outcome.
+        main = [hit(f"m{i}", semantic_similarity=0.1) for i in range(300)]
+        archive = [hit(f"a{i}", "archive", doc_date="2026-11-21") for i in range(300)]
+        documents = [hit("exact", "document", exact_match=True, lexical_evidence=10)]
+        rows = fuse_scopes(
+            [("main", main), ("archive", archive), ("documents", documents)],
+            today=date(2026, 11, 22),
+        )
+        self.assertEqual(next(i for i, row in enumerate(rows, 1) if row["id"] == "exact"), 10)
+
     def test_invalid_config_fails_explicitly(self):
         with patch.dict(os.environ, {"UNIFIED_FUSION_MODE": "mistyped"}):
             with self.assertRaisesRegex(ValueError, "UNIFIED_FUSION_MODE"):

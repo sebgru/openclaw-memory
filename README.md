@@ -76,6 +76,17 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 
 ## API
 
+### Compatibility changes, including legacy mode
+
+`legacy` remains the default **ranking** algorithm, but confidence handling has
+intentionally changed in both modes: `low_confidence` is evaluated over the full
+retrieved/fused candidate set before result limits or prompt quotas, rather than
+only the delivered rows. A response whose first row is weak can therefore omit
+`low_confidence` when another retrieved candidate has strong evidence beyond the
+limit. This preserves a query-level evidence signal instead of declaring a weak
+match solely because of truncation; it does not change the confidence floor or
+legacy numeric ranking. Query-log hardening also applies to both modes.
+
 Unified responses include `fusion: "legacy"|"rrf"`; `score` is an opaque ordering key and is not comparable across modes. Low confidence is computed before profile quotas and result truncation. Unified search supports an opt-in [rank fusion mode](docs/RANK_FUSION.md). Add
 `debug=1` to return numeric engine, candidate-legacy, pre/post-fusion and post-profile ranks in each result's `fusion_debug`
 field in that mode. Queries and candidate text are not logged by this path.

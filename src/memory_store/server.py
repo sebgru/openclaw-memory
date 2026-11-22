@@ -487,7 +487,6 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool", *, d
                         "alternate_provenance": [],
                     }
                 )
-            if mode == "rrf":
                 continue
             item = merged.setdefault(
                 result_id,
@@ -523,15 +522,23 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool", *, d
         # One bounded call retains its request deadline/candidate cap.
         # Interleave scope ranks so the bounded prefix is not main-only.
         # Dedup before Nimble so copies do not consume its bounded prefix.
-        legacy_candidates = sorted(
-            [row for _, lane in lanes for row in lane],
-            key=lambda row: -row.get("legacy_candidate_score", row["score"]),
-        )
+        identity_cache = {id(row): _identities(row) for _, lane in lanes for row in lane}
         legacy_ranks: dict[tuple, int] = {}
-        for rank, row in enumerate(legacy_candidates, 1):
-            for key in _identities(row):
-                legacy_ranks.setdefault(key, rank)
-        canonical = fuse_scopes(lanes)
+        if debug:
+            legacy_candidates = sorted(
+                [row for _, lane in lanes for row in lane],
+                key=lambda row: -row.get("legacy_candidate_score", row["score"]),
+            )
+            for rank, row in enumerate(legacy_candidates, 1):
+                for key in identity_cache[id(row)]:
+                    legacy_ranks.setdefault(key, rank)
+        group_members: dict[int, list[dict]] = {}
+        canonical = fuse_scopes(lanes, identity_cache=identity_cache, group_members=group_members)
+        # Every original member (including transitive identity bridges) maps to
+        # its group explicitly; canonical keys alone cannot identify all members.
+        owner = {
+            id(member): id(group) for group in canonical for member in group_members[id(group)]
+        }
         canonical_lanes = []
         for name, _ in lanes:
             lane = [row for row in canonical if name in row["fusion_debug"]["scope_ranks"]]
@@ -545,24 +552,31 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool", *, d
                 candidates.append(row)
                 seen.add(id(row))
         reranked = nimble_rerank(query, candidates)
-        order = {id(row): rank for rank, row in enumerate(reranked)}
-        # Reorder original members by their canonical group's Nimble rank while
-        # retaining all evidence/provenance for the final grouping.
-        owner = {}
-        for row in canonical:
-            for key in _identities(row):
-                owner[key] = order[id(row)]
-
-        def rerank_key(row):
-            return min((owner[key] for key in _identities(row) if key in owner), default=len(order))
-
-        lanes = [(name, sorted(lane, key=rerank_key)) for name, lane in lanes]
-        results = fuse_scopes(lanes)
-        for item in results:
-            item["fusion_debug"]["legacy_candidate_rank"] = min(
-                (legacy_ranks[key] for key in _identities(item) if key in legacy_ranks),
-                default=None,
-            )
+        if [id(row) for row in reranked] == [id(row) for row in candidates]:
+            # Disabled, fallback, and no-op reranking must preserve true ranks.
+            # Reuse the first fusion rather than repeating identity/group work.
+            results = canonical
+        else:
+            order = {id(row): rank for rank, row in enumerate(reranked)}
+            moved = {id(row) for rank, row in enumerate(candidates) if order[id(row)] != rank}
+            reordered = []
+            for name, lane in lanes:
+                # Reorder only moved groups represented in THIS lane, within
+                # their existing slots. Unaffected members retain their original
+                # relative order; a different lane's rank is never borrowed.
+                slots = [i for i, row in enumerate(lane) if owner[id(row)] in moved]
+                changed = sorted((lane[i] for i in slots), key=lambda row: order[owner[id(row)]])
+                updated = list(lane)
+                for i, row in zip(slots, changed, strict=True):
+                    updated[i] = row
+                reordered.append((name, updated))
+            results = fuse_scopes(reordered, identity_cache=identity_cache)
+        if debug:
+            for item in results:
+                item["fusion_debug"]["legacy_candidate_rank"] = min(
+                    (legacy_ranks[key] for key in _identities(item) if key in legacy_ranks),
+                    default=None,
+                )
     else:
         results = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
         results = nimble_rerank(query, results)

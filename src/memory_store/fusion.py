@@ -143,7 +143,7 @@ def _identities(row):
     return keys
 
 
-def fuse_scopes(lanes, today=None):
+def fuse_scopes(lanes, today=None, *, identity_cache=None, group_members=None):
     """RRF scope lists, collapse duplicate components, prefer canonical content.
 
     Duplicate ranks use max, not sum: copies are not independent evidence.
@@ -154,7 +154,7 @@ def fuse_scopes(lanes, today=None):
     index: dict[tuple, int] = {}
     for scope, rows in lanes:
         for rank, row in enumerate(rows, 1):
-            keys = _identities(row)
+            keys = identity_cache[id(row)] if identity_cache is not None else _identities(row)
             matches = {index[key] for key in keys if key in index}
             group_id = min(matches) if matches else len(groups)
             if not matches:
@@ -223,6 +223,8 @@ def fuse_scopes(lanes, today=None):
                 ):
                     alternatives.append(provenance)
         item["alternate_provenance"] = alternatives
+        if group_members is not None:
+            group_members[id(item)] = [row for _, _, row in group]
         results.append(item)
     results.sort(
         key=lambda item: (
