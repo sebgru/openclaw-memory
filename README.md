@@ -20,7 +20,7 @@ Configuration is supplied by environment variables: `DOCUMENT_ROOT`, `INCLUDE_PA
 
 What this service is for, and what every change must preserve, is defined in [Requirements](docs/REQUIREMENTS.md).
 
-An optional, default-disabled private fact layer provides authenticated draft/confirm capture and deterministic current-state resolution. See [Private fact capture](docs/FACTS.md) for configuration, APIs, and the instance-token / agent-side human-confirmation trust split. Existing endpoints retain their network-isolation model; the new fact read/write routes additionally require a bearer token.
+An optional, default-disabled private fact layer provides authenticated draft/confirm capture and deterministic current-state resolution. See [Private fact capture](docs/FACTS.md) for configuration, APIs, and the instance-token / agent-side human-confirmation trust split (`confirmation.assurance=agent_asserted`, rank-zero tier `T0_owner_asserted`). Existing endpoints retain their network-isolation model; the new fact read/write routes additionally require a bearer token.
 
 For a tiered memory layout, including a separate historical session archive and a human-reviewed promotion workflow, see [Tiered memory architecture](docs/MEMORY_ARCHITECTURE.md). Set `ARCHIVE_ROOT`, `ARCHIVE_SQLITE_PATH`, and optionally `ARCHIVE_QDRANT_COLLECTION` to enable the explicit `/archive/*` API.
 

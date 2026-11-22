@@ -10,7 +10,7 @@ this implementation.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MEMORY_FACTS_ENABLED` | `false` | Enable new fact routes (`true`, `yes`, `1`) |
-| `MEMORY_FACTS_SQLITE_PATH` | `facts.db` | Separate private SQLite file, never an index DB |
+| `MEMORY_FACTS_SQLITE_PATH` | `/data/facts.db` | Separate private SQLite file; configured overrides must be absolute, never an index DB |
 | `MEMORY_FACTS_WRITE_TOKEN` | unset | Bearer secret for **all** fact routes, including reads |
 | `MEMORY_FACTS_WRITE_TOKEN_FILE` | unset | Secret-file alternative; takes precedence; unreadable/empty fails closed |
 | `MEMORY_FACTS_RECENCY_DAYS` | `60` | Conversation recency window |
@@ -22,7 +22,10 @@ a private directory/volume and one DB/token per OpenClaw instance/principal. A
 restart loses pending drafts; it does not promote them. Do not share the DB,
 network, or bearer secret between principals. The token is sampled at startup;
 rotating its file requires a service restart through the deployment's normal gate.
-No token values are logged or returned.
+No token values are logged or returned. The bearer scheme is case-sensitive
+(`Bearer`). Token length, pre-existing file modes and rate limiting remain
+operator responsibilities on the isolated network; creation mode is not a
+permission audit of an existing DB or token file.
 
 ## Trust split (important)
 
@@ -42,6 +45,10 @@ cannot authenticate a person's `yes`, inspect chat reply metadata, verify source
 truth, or establish an audience from `origin.audience` or `confirmation.by`.
 **Those fields and `confirmation.session_ref` are supplied provenance, not proof
 of human identity.** A compromised instance token can assert false owner facts.
+Persisted owner assertions include `confirmation.assurance: "agent_asserted"`;
+this field is required on stored owner facts (the service supplies it on confirm).
+Resolved rank zero is named `T0_owner_asserted`, not a claim of a human-verified
+curated file. Consumers must preserve this caveat along with provenance.
 Group/unknown/other-principal turns must never call this lane. Restricted facts
 are explicit-request-only, not automatic profile material. No automatic profile
 injection is implemented here.
@@ -76,10 +83,19 @@ or `will_supersede`. Synthetic example:
 
 Returns a `CaptureDraft` with an opaque ID, 24-hour expiry and computed target
 list. Drafts are volatile, limited to 100 pending per process, never stored in
-SQLite. Invalid/secret-like drafts fail before storage. Unknown/custom predicates
+SQLite. Expired values are pruned on draft creation, reads and confirmation
+attempts (including malformed confirmations), not just on a new draft. This is
+operation-triggered pruning, not an idle background timer; restart drops all
+pending values. Invalid/secret-like drafts fail before storage. Unknown/custom predicates
 are blocked pending registry review; derived ages and volatile health snapshots
 cannot be stored. Registry types, units, minimum privacy, set item keys, known
-observation dates and exclusive interval ordering are checked. Provenance has
+observation dates and exclusive interval ordering are checked. Dates use exactly
+`YYYY-MM-DD`; timestamps use RFC3339 calendar date, `T`, `HH:MM:SS`, optional
+fraction and mandatory `Z`/numeric offset. Invalid calendar dates/times, compact
+dates, ISO-week forms, timezone-naive times and leap seconds are rejected before
+a draft can be retained. Timestamp format validation is a declared runtime
+dependency; the JSON Schema library is imported only on validation, not on the
+disabled server startup path. Provenance has
 no excerpt field; nested `excerpt` fields are rejected as well.
 
 The agent displays the exact value, privacy, effective date, action and target
@@ -114,7 +130,10 @@ writes workspace memory files.
   independent; series observations do not supersede prior dates. Differing owner
   claims without an explicit transition become linked conflicts, not a recency
   vote. Duplicate owner claims are rejected rather than creating duplicate current
-  records; an explicit refresh operation can be added separately.
+  records; an explicit refresh operation can be added separately. Existing
+  mutable state/set assertions can be re-confirmed via an explicitly displayed
+  same-value `replace` with a known effective date; series can add a new dated
+  observation. This is not an invisible freshness refresh.
 - `replace`: state or same set key only, with a known `valid_from`. Server computes
   `will_supersede` from open-ended owner assertions only; unreviewed document/mail
   claims are not turned into proven historical states. Confirmation closes the
@@ -128,6 +147,9 @@ writes workspace memory files.
   keyed source/slot suppression hash, and remove pending same-slot drafts.
   Ended/superseded history can also be forgotten. Re-extraction of the suppressed
   source/slot is rejected; a new explicitly confirmed owner assertion is allowed.
+  Forgetting a replacement never resurrects its superseded predecessor: its old
+  exclusive end remains, and now-tombstoned link IDs may remain for audit/history.
+  A new assertion needs its own proposal/confirmation.
 
 `POST /facts/end` and `/facts/retract` are action-checked aliases for **draft
 creation**, not bypasses for confirmation. They take the corresponding draft
@@ -181,10 +203,30 @@ Extraction must establish that evidence actually asserts the predicate/subject.
 A billing address is not automatically a residence assertion; a service mention
 is not ownership evidence. This service cannot infer those distinctions from a
 pointer, nor authenticate source dates, alias equivalence, or OCR subject linkage.
-Secret-pattern checks are deliberately conservative defense in depth (including
-nested values and common credential formats), not proof that arbitrary secrets
-can be detected. Agent-side semantic screening remains required.
+Secret-pattern checks apply NFKC normalization and remove Unicode format (`Cf`)
+characters before matching; nested payloads, passphrases, secrets/tokens,
+PIN/OTP/CVV labels, common localized credential words, long hex/Base32 and
+credential formats are rejected. These are deliberately conservative checks:
+ordinary phrases such as a company name containing "Credential" can be false
+positives. They are not proof that arbitrary secrets or sensitive identifiers
+can be detected; card/IBAN classification is not implemented here. Agent-side semantic screening remains required.
 
 Tests contain only invented records and generic references. The packaged JSON
 Schema is a separately scrubbed structural specification, not a private design
 or migration artifact. No production imports or real evidence are test inputs.
+
+## Implementation housekeeping and non-goals
+
+DDL initialization is guarded per database file identity within a store instance;
+normal subsequent writes do not repeat `executescript`. A new store instance
+checks/initializes its DB idempotently. The package version stays at the current
+release number until the coordinated release process; this development branch
+does not publish a release.
+
+`ingest_candidate` remains an internal, synthetic-tested integration hook with no
+production caller in this change. Its tombstone suppression lookup currently
+scans rows (O(n)); indexing is deferred until a production connector provides a
+measured workload. The HMAC salt is stored in the same private DB: suppression
+keys avoid raw source text in tombstones but **are not anonymization against a DB
+reader**. Low-entropy source/slot guesses can be tested by someone with that DB.
+The isolation/token boundary, not that hash, protects private data.

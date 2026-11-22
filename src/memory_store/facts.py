@@ -9,13 +9,12 @@ import re
 import secrets
 import sqlite3
 import threading
+import unicodedata
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from importlib.resources import files
 from pathlib import Path
 from zoneinfo import ZoneInfo
-
-from jsonschema import Draft202012Validator, FormatChecker
 
 _SCHEMA = json.loads(files("memory_store").joinpath("fact_schema.json").read_text())
 
@@ -25,6 +24,9 @@ class FactError(ValueError):
 
 
 def validate(kind, payload):
+    # Keep optional feature dependencies off the disabled server import path.
+    from jsonschema import Draft202012Validator, FormatChecker
+
     validator = Draft202012Validator(
         {"$ref": f"#/$defs/{kind}", "$defs": _SCHEMA["$defs"]},
         format_checker=FormatChecker(),
@@ -34,10 +36,13 @@ def validate(kind, payload):
 
 
 def instant(value):
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2}))?",
+        value,
+    ):
         raise FactError("invalid date")
     try:
-        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        result = datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
         return result.replace(tzinfo=UTC) if result.tzinfo is None else result.astimezone(UTC)
     except ValueError:
         raise FactError("invalid date") from None
@@ -77,10 +82,16 @@ REGISTRY = {
 
 def screen(payload):
     """Conservative defense in depth, not a universal semantic secret detector."""
-    text = json.dumps(payload, ensure_ascii=False)
+    text = "".join(
+        char
+        for char in unicodedata.normalize("NFKC", json.dumps(payload, ensure_ascii=False))
+        if unicodedata.category(char) != "Cf"
+    )
     patterns = (
-        r"(?i)password|passwd|credential|api[_ -]?key|access[_ -]?token|bearer\s|private[_ -]?key|client[_ -]?secret|recovery[_ -]?(?:code|phrase)|seed[_ -]?phrase|пароль|passwort",
-        r"\b(?:sk-|ghp_|github_pat_|xox[baprs]-|AKIA)[A-Za-z0-9_-]{8,}",
+        r"(?i)pass(?:word|phrase)|passwd|credential|api[_ -]?key|\bsecret\b|\btoken\b|\bpin\b|\botp\b|\bcvv\b|kennwort|zugangsdaten|access[_ -]?token|bearer\s|authorization\s*:\s*basic|private[_ -]?key|client[_ -]?secret|recovery[_ -]?(?:code|phrase)|seed[_ -]?phrase|пароль|passwort",
+        r"\b[a-fA-F0-9]{32,}\b",
+        r"\b[A-Z2-7]{16,}\b",
+        r"\b(?:sk-|ghp_|github_pat_|xox[baprs]-|AKIA)[A-Za-z0-9_-]+",
         r"-----BEGIN .*PRIVATE KEY-----",
         r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
         r"://[^\s/:]+:[^\s/@]+@",
@@ -123,6 +134,9 @@ def semantics(fact):
         raise FactError("item_key only applies to sets")
     if temporal == "series" and not fact["valid_from"]:
         raise FactError("series requires observation date")
+    for bound in ("valid_from", "valid_to"):
+        if fact.get(bound) is not None:
+            instant(fact[bound])
     if fact.get("valid_to") and fact["valid_from"]:
         if instant(fact["valid_to"]) <= instant(fact["valid_from"]):
             raise FactError("invalid exclusive interval")
@@ -201,9 +215,10 @@ def resolve(
         latest = max(instant(f["valid_from"]) for f in eligible)
         history += [f for f in eligible if instant(f["valid_from"]) < latest]
         eligible = [f for f in eligible if instant(f["valid_from"]) == latest]
+    strong = [f for f in eligible if f["confidence"] >= 0.4 and f["source_class"] != "mail"]
     dated_band = [
         instant(f["provenance"]["evidence_date"])
-        for f in eligible
+        for f in strong
         if f["source_class"] in {"document", "conversation"} and f["provenance"]["evidence_date"]
     ]
     newest = max(dated_band) if dated_band else None
@@ -220,7 +235,6 @@ def resolve(
             return 1
         return 2 if date and instant(date) == newest else 3
 
-    strong = [f for f in eligible if f["confidence"] >= 0.4 and f["source_class"] != "mail"]
     if not strong:
         if eligible:
             result["state"] = "unverified_only"
@@ -253,7 +267,7 @@ def resolve(
         values = {json.dumps(f["value"], sort_keys=True) for f in leaders}
         result["source_rank"] = best
         result["source_tier"] = (
-            "T0_curated",
+            "T0_owner_asserted",
             "T1_recent",
             "document_newer",
             "document_older",
@@ -322,10 +336,20 @@ class FactStore:
         ZoneInfo(timezone)
         self._lock = threading.RLock()
         self._drafts = {}
+        self._schema_identity = None
 
     def _enabled(self):
         if not self.enabled:
             raise FactError("facts disabled")
+
+    def _prune_drafts(self):
+        with self._lock:
+            at = self.clock()
+            self._drafts = {
+                key: value
+                for key, value in self._drafts.items()
+                if instant(value["expires_at"]) > at
+            }
 
     @contextmanager
     def _db(self):
@@ -338,7 +362,11 @@ class FactStore:
             db.row_factory = sqlite3.Row
             try:
                 db.execute("PRAGMA secure_delete=ON")
-                db.executescript("""
+                stat = os.stat(self.path)
+                identity = (stat.st_dev, stat.st_ino)
+                initialize = self._schema_identity != identity
+                if initialize:
+                    db.executescript("""
                 CREATE TABLE IF NOT EXISTS facts (
                   fact_id TEXT PRIMARY KEY, subject TEXT NOT NULL, predicate TEXT NOT NULL,
                   item_key TEXT, payload TEXT NOT NULL);
@@ -355,12 +383,14 @@ class FactStore:
                 CREATE TABLE IF NOT EXISTS metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL);
                 """)
                 db.execute("BEGIN IMMEDIATE")
-                db.execute(
-                    "INSERT OR IGNORE INTO metadata VALUES('suppression_salt', ?)",
-                    (secrets.token_hex(32),),
-                )
+                if initialize:
+                    db.execute(
+                        "INSERT OR IGNORE INTO metadata VALUES('suppression_salt', ?)",
+                        (secrets.token_hex(32),),
+                    )
                 yield db
                 db.commit()
+                self._schema_identity = identity
             except BaseException:
                 db.rollback()
                 raise
@@ -379,6 +409,7 @@ class FactStore:
 
     def read(self, subject, predicate, item_key=None, as_of=None, include_history=False):
         self._enabled()
+        self._prune_drafts()
         # Reads of an unused lane do not create an empty database.
         if not Path(self.path).exists():
             rows = []
@@ -441,6 +472,9 @@ class FactStore:
         self._enabled()
         validate("Fact", fact)
         semantics(fact)
+        for provenance in [fact["provenance"], *fact.get("evidence", [])]:
+            if provenance["evidence_date"] is not None:
+                instant(provenance["evidence_date"])
         screen(
             {
                 "predicate": fact["predicate"],
@@ -463,6 +497,7 @@ class FactStore:
 
     def draft(self, payload):
         self._enabled()
+        self._prune_drafts()
         if not isinstance(payload, dict):
             raise FactError("invalid draft")
         draft = copy.deepcopy(payload)
@@ -554,9 +589,6 @@ class FactStore:
                 ):
                     raise FactError("transition must follow target start")
         with self._lock:
-            self._drafts = {
-                k: v for k, v in self._drafts.items() if instant(v["expires_at"]) > self.clock()
-            }
             if len(self._drafts) >= 100:
                 raise FactError("pending draft limit")
             self._drafts[draft["draft_id"]] = draft
@@ -564,7 +596,9 @@ class FactStore:
 
     def confirm(self, draft_id, confirmation):
         self._enabled()
+        self._prune_drafts()
         validate("Confirmation", confirmation)
+        confirmation = {**confirmation, "assurance": "agent_asserted"}
         with self._lock:
             draft = self._drafts.get(draft_id)
             if not draft or instant(draft["expires_at"]) <= self.clock():

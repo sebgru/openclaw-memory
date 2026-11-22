@@ -27,7 +27,12 @@ from memory_store.facts import (
 
 AT = datetime(2026, 11, 22, 12, tzinfo=UTC)
 STAMP = "2026-11-22T12:00:00Z"
-CONFIRM = {"by": "owner", "at": STAMP, "session_ref": "session:synthetic#yes1"}
+CONFIRM = {
+    "by": "owner",
+    "at": STAMP,
+    "session_ref": "session:synthetic#yes1",
+    "assurance": "agent_asserted",
+}
 
 
 def claim(n=1, source="document", value="Example Org", date="2026-11-01", **kw):
@@ -416,6 +421,7 @@ def api(store):
             c.close()
             return result
 
+        request.address = http.server_address
         yield request
         http.shutdown()
         http.server_close()
@@ -811,3 +817,279 @@ def test_internal_lifecycle_cannot_mutate_claim_value(store):
     with pytest.raises(FactError, match="immutable"), store._db() as db:
         store._save(db, dict(fact, value="Illegitimate mutation"), "end", "current")
     assert store.read("person:owner", "employment.employer")["current"]["value"] == fact["value"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "garbage",
+        "2020-13-45",
+        "2020-01-01T25:00:00Z",
+        "20200101",
+        "2020-W01-1",
+        "2020-01-01T12:00:00",
+        "2020-01-01T12:00Z",
+    ],
+)
+@pytest.mark.parametrize("field", ["valid_from", "valid_to"])
+def test_review_m1_bad_date_rejected_before_draft_retention(store, value, field):
+    with pytest.raises(FactError):
+        store.draft(draft(**{field: value}))
+    assert not store._drafts and not Path(store.path).exists()
+    assert store.read("person:owner", "employment.employer")["state"] == "not_found"
+
+
+@pytest.mark.parametrize("field", ["recorded_at", "last_verified", "provenance", "evidence"])
+def test_review_m1_bad_ingest_dates_rejected(store, field):
+    fact = claim()
+    if field == "provenance":
+        fact["provenance"]["evidence_date"] = "not-a-date"
+    elif field == "evidence":
+        fact["evidence"] = [{**fact["provenance"], "evidence_date": "not-a-date"}]
+    else:
+        fact[field] = "not-a-date"
+    with pytest.raises(FactError):
+        store.ingest_candidate(fact)
+    assert not Path(store.path).exists()
+
+
+def test_review_m1_valid_formats_and_confirmation_rejection(store):
+    from memory_store.facts import instant
+
+    for date in ["2020-01-01", "2020-01-01T12:34:56Z", "2020-01-01T12:34:56.123+02:00"]:
+        assert instant(date)
+        assert store.draft(draft(valid_from=date))["valid_from"] == date
+    with pytest.raises(FactError):
+        instant("2020-13-45")
+    with pytest.raises(FactError):
+        store.confirm(next(iter(store._drafts)), dict(CONFIRM, at="not-a-date"))
+    assert not Path(store.path).exists()
+
+
+@pytest.mark.parametrize("source", ["document", "conversation"])
+def test_review_m2_weak_newer_evidence_cannot_flip_document_choice(source):
+    a = claim(1, value="Org A", date="2024-01-01")
+    b = claim(2, value="Org B", date="2024-06-01")
+    weak = claim(3, source, value="Org Z", date="2026-11-01", confidence=0.3)
+    result = lookup([a, b, weak])
+    assert result["state"] == "resolved"
+    assert result["current"]["fact_id"] == b["fact_id"]
+    assert result["source_rank"] == 2 and result["source_tier"] == "document_newer"
+    assert weak in result["alternatives"]
+
+
+def raw_request(address, payload):
+    import socket
+
+    with socket.create_connection(address, timeout=3) as connection:
+        connection.sendall(payload)
+        data = bytearray()
+        while chunk := connection.recv(65536):
+            data.extend(chunk)
+    return bytes(data)
+
+
+@pytest.mark.parametrize("line", [b"GET / HTTP/9.9\r\n\r\n", b"garbage request line\r\n\r\n"])
+def test_review_m1_minor_malformed_request_line_has_no_traceback(api, capfd, line):
+    response = raw_request(api.address, line)
+    assert b"Error response" in response
+    assert b"Traceback" not in response
+    assert "AttributeError" not in capfd.readouterr().err
+
+
+def test_review_n1_deep_json_is_a_generic_400_not_connection_crash(api, capfd):
+    body = b"[" * 1500 + b"0" + b"]" * 1500
+    response = raw_request(
+        api.address,
+        b"POST /facts/drafts HTTP/1.0\r\nAuthorization: Bearer synthetic-only\r\nContent-Length: "
+        + str(len(body)).encode()
+        + b"\r\n\r\n"
+        + body,
+    )
+    assert b"400 Bad Request" in response and b"invalid or expired fact capture" in response
+    assert "RecursionError" not in capfd.readouterr().err
+
+
+def test_review_m2_minor_assurance_is_persisted_and_returned(api, store):
+    d = store.draft(draft())
+    confirmation = {k: v for k, v in CONFIRM.items() if k != "assurance"}
+    fact = store.confirm(d["draft_id"], confirmation)["facts"][0]
+    assert fact["confirmation"]["assurance"] == "agent_asserted"
+    status, current = api(
+        "GET", "/facts/current?subject=person:owner&predicate=employment.employer"
+    )
+    assert status == 200
+    assert current["source_tier"] == "T0_owner_asserted"
+    assert current["current"]["confirmation"]["assurance"] == "agent_asserted"
+    with sqlite3.connect(store.path) as db:
+        saved = json.loads(db.execute("SELECT payload FROM facts").fetchone()[0])
+    assert saved["confirmation"]["assurance"] == "agent_asserted"
+    validate("Fact", saved)
+    saved["confirmation"].pop("assurance")
+    with pytest.raises(FactError):
+        validate("Fact", saved)
+
+
+def test_review_m3_disabled_import_does_not_load_jsonschema(tmp_path):
+    import os
+    import subprocess
+
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+        "SQLITE_PATH": str(tmp_path / "index.db"),
+        "DOCUMENTS_ROOT": "",
+        "ARCHIVE_ROOT": "",
+        "MEMORY_FACTS_ENABLED": "false",
+        "QDRANT_URL": "",
+    }
+    script = """
+import builtins, sys
+original = builtins.__import__
+def blocked(name, *args, **kwargs):
+    if name.startswith(('jsonschema', 'rfc3339_validator')):
+        raise ImportError('optional dependency deliberately unavailable')
+    return original(name, *args, **kwargs)
+builtins.__import__ = blocked
+from memory_store import server
+assert not server.FACTS_ENABLED
+assert not any(name.startswith('jsonschema') for name in sys.modules)
+"""
+    result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "passphrase synthetic",
+        "secret synthetic",
+        "token synthetic",
+        "PIN 4711",
+        "CVV 123",
+        "Kennwort synthetic",
+        "Zugangsdaten synthetic",
+        "otp seed synthetic",
+        "p\u200ba\u200bssword synthetic",
+        "ｐａｓｓｗｏｒｄ synthetic",
+        "ｔｏｋｅｎ synthetic",
+        "a" * 40,
+        "b" * 64,
+        "sk-abc",
+        "JBSWY3DPEHPK3PXP",
+        "Authorization: Basic Zm9vOmJhcg==",
+    ],
+)
+def test_review_m4_secret_gaps_are_screened_before_retention(store, value):
+    with pytest.raises(FactError, match="credential-like"):
+        store.draft(draft(value=value))
+    assert not store._drafts and not Path(store.path).exists()
+
+
+@pytest.mark.parametrize("operation", ["read", "confirm", "invalid_confirm"])
+def test_review_m5_all_expired_drafts_pruned_on_read_or_confirm(store, operation):
+    first = store.draft(draft(value="Pending value A"))
+    second = store.draft(draft(value="Pending value B"))
+    store.clock = lambda: AT + timedelta(hours=24)
+    if operation == "read":
+        store.read("person:owner", "employment.employer")
+    else:
+        with pytest.raises(FactError):
+            store.confirm(first["draft_id"], {} if operation == "invalid_confirm" else CONFIRM)
+    assert first["draft_id"] not in store._drafts
+    assert second["draft_id"] not in store._drafts
+    assert not Path(store.path).exists()
+
+
+def test_review_m6_concurrent_same_draft_commits_once(store):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    d = store.draft(draft())
+    barrier = Barrier(2)
+
+    def confirm():
+        barrier.wait(timeout=3)
+        try:
+            return store.confirm(d["draft_id"], CONFIRM)
+        except FactError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: confirm(), range(2)))
+    assert sum(result is not None for result in results) == 1
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT count(*) FROM facts").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM lifecycle").fetchone()[0] == 1
+
+
+def test_review_m6_concurrent_conflicting_drafts_are_atomic_conflict(store):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    drafts = [store.draft(draft(value=value)) for value in ["Org A", "Org B"]]
+    barrier = Barrier(2)
+
+    def confirm(d):
+        barrier.wait(timeout=3)
+        return store.confirm(d["draft_id"], CONFIRM)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(confirm, drafts))
+    assert len(results) == 2
+    result = store.read("person:owner", "employment.employer")
+    assert result["state"] == "conflict" and "current" not in result
+    with sqlite3.connect(store.path) as db:
+        records = [json.loads(row[0]) for row in db.execute("SELECT payload FROM facts")]
+    assert len(records) == 2 and all(f["status"] == "conflict" for f in records)
+    assert all(
+        f["conflicts_with"] == [other["fact_id"] for other in records if other != f]
+        for f in records
+    )
+
+
+def test_review_n3_default_absolute_and_relative_path_refused(tmp_path):
+    import os
+    import subprocess
+
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+        "SQLITE_PATH": str(tmp_path / "index.db"),
+        "DOCUMENTS_ROOT": "",
+        "ARCHIVE_ROOT": "",
+        "MEMORY_FACTS_ENABLED": "false",
+        "QDRANT_URL": "",
+    }
+    env.pop("MEMORY_FACTS_SQLITE_PATH", None)
+    result = subprocess.run(
+        [sys.executable, "-c", "from memory_store import server; print(server.FACTS_PATH)"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "/data/facts.db"
+    result = subprocess.run(
+        [sys.executable, "-c", "from memory_store import server"],
+        env={**env, "MEMORY_FACTS_ENABLED": "true", "MEMORY_FACTS_SQLITE_PATH": "relative.db"},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0 and "must be absolute" in result.stderr
+    assert not (tmp_path / "facts.db").exists()
+
+
+def test_review_n6_schema_ddl_is_one_shot_for_existing_file(store):
+    traces = []
+    original = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        db = original(*args, **kwargs)
+        db.set_trace_callback(traces.append)
+        return db
+
+    with patch("memory_store.facts.sqlite3.connect", side_effect=connect):
+        store.ingest_candidate(claim(1))
+        store.ingest_candidate(claim(2))
+    assert sum("CREATE TABLE IF NOT EXISTS facts" in sql for sql in traces) == 1
+    assert store.read("person:owner", "employment.employer")["state"] == "resolved"

@@ -219,6 +219,9 @@
         },
         "session_ref": {
           "type": "string"
+        },
+        "assurance": {
+          "const": "agent_asserted"
         }
       }
     },
@@ -448,6 +451,12 @@
               "confidence": {
                 "type": "number",
                 "minimum": 0.9
+              },
+              "confirmation": {
+                "type": "object",
+                "required": [
+                  "assurance"
+                ]
               }
             }
           }
@@ -1225,7 +1234,7 @@
         },
         "source_tier": {
           "enum": [
-            "T0_curated",
+            "T0_owner_asserted",
             "T1_recent",
             "document_newer",
             "document_older",

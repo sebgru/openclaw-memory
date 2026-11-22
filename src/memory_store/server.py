@@ -93,7 +93,9 @@ DOCUMENTS_EXCLUDE_PATTERNS = patterns("DOCUMENTS_EXCLUDE_PATTERNS", "")
 
 FACTS_ENABLED = os.getenv("MEMORY_FACTS_ENABLED", "false").lower() in {"1", "true", "yes"}
 FACTS_TOKEN = token_from_env(os.environ) if FACTS_ENABLED else ""
-FACTS_PATH = os.getenv("MEMORY_FACTS_SQLITE_PATH", "facts.db")
+FACTS_PATH = os.getenv("MEMORY_FACTS_SQLITE_PATH", "/data/facts.db")
+if FACTS_ENABLED and not os.path.isabs(FACTS_PATH):
+    raise ValueError("fact database path must be absolute")
 if FACTS_ENABLED and os.path.realpath(FACTS_PATH) in {
     os.path.realpath(os.getenv(name, default))
     for name, default in (
@@ -548,7 +550,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise FactError("action does not match endpoint")
                 result = fact_store.draft(payload)
             return self.send_json(200, result)
-        except (ValueError, TypeError, KeyError):
+        except (ValueError, TypeError, KeyError, RecursionError):
             return self.send_json(400, {"error": "invalid or expired fact capture"})
         except (OSError, sqlite3.Error):
             return self.send_json(503, {"error": "fact store unavailable"})
@@ -911,10 +913,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(400, {"error": str(exc)})
 
     def log_message(self, format, *args):
+        path = getattr(self, "path", "")
         if FACTS_ENABLED and (
-            self.path.startswith("/facts/")
-            or "fact_subject=" in self.path
-            or "fact_predicate=" in self.path
+            path.startswith("/facts/") or "fact_subject=" in path or "fact_predicate=" in path
         ):
             logger.info("private fact request completed")
         else:
