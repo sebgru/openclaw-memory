@@ -80,7 +80,9 @@ class DocumentIndexer:
         self.lock_path = db_path + ".lock" if db_path else str(self.root / ".documents.lock")
         self.read_only = read_only
         self.context_header = bool(context_header)
-        self.frontmatter_date_keys = tuple(frontmatter_date_keys)
+        self.frontmatter_date_keys = tuple(
+            key.strip().lower() for key in frontmatter_date_keys if key.strip()
+        )
         if not read_only:
             self._init_state()
 
@@ -106,8 +108,9 @@ class DocumentIndexer:
 
     @property
     def profile(self):
-        """Identifies how files are indexed; a ``reindex`` run redoes files with another one."""
-        return f"meta{METADATA_VERSION}|header={int(self.context_header)}"
+        """How files are indexed (version, header flag, ordered date keys); ``reindex`` redoes others."""
+        keys = hashlib.sha256("\0".join(self.frontmatter_date_keys).encode()).hexdigest()[:12]
+        return f"meta{METADATA_VERSION}|header={int(self.context_header)}|datekeys={keys}"
 
     def _profiles(self):
         return dict(self.store.db.execute("SELECT path, profile FROM document_index_profile"))

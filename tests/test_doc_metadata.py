@@ -113,6 +113,31 @@ class DateTests(unittest.TestCase):
         ):
             self.assertIsNone(self.date(content), content)
 
+    def test_comma_separated_non_document_labels_are_rejected(self):
+        for content in (
+            "Geburtsdatum, 12. März 1980",
+            "Geburtsdatum, den 12.03.1980",
+            "Due date, March 3rd, 2030",
+            "Fällig, 12. März 2024",
+            "Fälligkeit, den 12.03.2024",
+            "Zahlbar bis, den 12.03.2024",
+            "Geb., 12. März 1980",
+            "Date of birth, 12 March 1980",
+            "Created, March 3rd, 2022",
+            "Erstellt, den 12.03.2024",
+            "Gültig bis, 12. März 2030",
+            "Konvertiert, 12. März 2024",
+        ):
+            self.assertIsNone(self.date(content), content)
+
+    def test_letter_dateline_still_accepted(self):
+        self.assertEqual(self.date("Musterstadt, den 12.03.2024"), "2024-03-12")
+        self.assertEqual(self.date("Musterstadt, 12. März 2024"), "2024-03-12")
+        self.assertEqual(self.date("Sankt Beispiel, March 3rd, 2022"), "2022-03-03")
+        self.assertEqual(
+            self.date("Fällig, 12. März 2024\nMusterstadt, den 01.02.2023"), "2023-02-01"
+        )
+
     def test_only_top_of_document_is_scanned(self):
         content = "\n".join(["zeile"] * 80 + ["Datum: 12.03.2024"])
         self.assertIsNone(self.date(content))
@@ -162,6 +187,9 @@ class CategoryTests(unittest.TestCase):
         content = "---\ntags: versicherung police\n---\nnichts"
         self.assertEqual(dm.classify_category("scan/001.md", content), "other")
         self.assertEqual(dm.classify_category("a/versicherung-kfz.md", "x"), "insurance")
+        self.assertEqual(dm.classify_category("a/kfz-versicherung.md", "x"), "insurance")
+        self.assertEqual(dm.classify_category("a/arzt-miete.md", "x"), "health")
+        self.assertEqual(dm.classify_category("a/miete-arzt.md", "x"), "health")
 
     def test_compound_words_match_long_keywords_only(self):
         self.assertEqual(dm.classify_category("a/steuererklaerung-2020.md", "x"), "finance")

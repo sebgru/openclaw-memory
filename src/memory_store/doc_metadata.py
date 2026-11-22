@@ -122,7 +122,13 @@ _DATE_LABEL = re.compile(
     re.I,
 )
 _LETTER_DATE_LINE = re.compile(
-    r"^[^\W\d_][^\W\d_ .'-]*(?: [^\W\d_][^\W\d_.'-]*){0,3},\s*(den\s+)?(.+?)\s*$"
+    r"^([^\W\d_][^\W\d_ .'-]*(?: [^\W\d_][^\W\d_.'-]*){0,3}),\s*(den\s+)?(.+?)\s*$"
+)
+_NON_DOCUMENT_DATE_LABEL = re.compile(
+    r"geburt|geboren|\bgeb\b|birth|born|\bdob\b|fallig|\bdue\b|zahlbar|zahlungsziel|frist|"
+    r"deadline|ablauf|expir|gultig|valid|konver|convert|erstellt|created|modif|geandert|"
+    r"updated|aktualis|stichtag|beginn|\bende\b|\bend\b|\bstart|laufzeit|verfall|"
+    r"lieferdatum|leistungsdatum|termin|appointment|\bvon\b|\bbis\b|\bfrom\b|\buntil\b"
 )
 
 
@@ -136,8 +142,11 @@ def _date_from_content(body):
                 return parsed
         letter = _LETTER_DATE_LINE.match(fold(line.strip(" *_`|#>")))
         if letter:
-            # "Name, 15.03.1985" is usually a birth date; require "den" or a month name.
-            den, candidate = letter.group(1), letter.group(2).rstrip(" .")
+            # "Name, 15.03.1985" is usually a birth date and "Fällig, ..." a due date: skip
+            # known non-document labels and require "den" or a month name.
+            label, den, candidate = letter.group(1), letter.group(2), letter.group(3).rstrip(" .")
+            if _NON_DOCUMENT_DATE_LABEL.search(fold(label)):
+                continue
             parsed = parse_date_prefix(candidate)
             if parsed and len(candidate) <= 30 and (den or re.search(r"[a-z]", candidate)):
                 return parsed

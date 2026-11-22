@@ -223,7 +223,10 @@ class IndexingMetadataTests(unittest.TestCase):
 
     def test_flag_defaults_to_off(self):
         self.assertFalse(self.indexer().context_header)
-        self.assertEqual(self.indexer().profile, f"meta{METADATA_VERSION}|header=0")
+        profile = self.indexer().profile
+        self.assertTrue(profile.startswith(f"meta{METADATA_VERSION}|header=0|datekeys="))
+        self.assertEqual(profile, self.indexer().profile)
+        self.assertNotEqual(profile, self.indexer(context_header=True).profile)
 
     def test_flag_on_prepends_header_to_embedding_and_fts_only(self):
         embed, vectors = RecordingEmbed(), RecordingVectors()
@@ -265,7 +268,7 @@ class IndexingMetadataTests(unittest.TestCase):
         self.indexer().scan()
         self.assertEqual(
             set(self.store.db.execute("SELECT profile FROM document_index_profile").fetchall()[0]),
-            {"meta1|header=0"},
+            {self.indexer().profile},
         )
         embed = RecordingEmbed()
         indexer = self.indexer(embed=embed, context_header=True)
@@ -278,9 +281,36 @@ class IndexingMetadataTests(unittest.TestCase):
         profiles = {
             r[0] for r in self.store.db.execute("SELECT profile FROM document_index_profile")
         }
-        self.assertEqual(profiles, {"meta1|header=1"})
+        self.assertEqual(profiles, {indexer.profile})
         self.assertTrue(all("\n" in text for text in embed.inputs))
         self.assertIn("Brief\n", "".join(embed.inputs))
+
+    def test_date_key_config_is_part_of_profile_and_triggers_bounded_reindex(self):
+        (self.root / "keys.md").write_text("---\ndate: 2020-01-01\nissued: 2021-02-03\n---\nText\n")
+        self.indexer().scan()
+        self.assertEqual(self.chunk_rows("keys.md")[0]["doc_date"], "2020-01-01")
+        default = self.indexer().profile
+        issued = self.indexer(frontmatter_date_keys=("issued",))
+        self.assertNotEqual(issued.profile, default)
+        self.assertNotEqual(
+            self.indexer(frontmatter_date_keys=("issued", "date")).profile,
+            self.indexer(frontmatter_date_keys=("date", "issued")).profile,
+        )
+        self.assertEqual(
+            self.indexer(frontmatter_date_keys=(" ISSUED ", "")).profile, issued.profile
+        )
+        self.assertEqual(issued.scan().changed, 0)
+        self.assertEqual(self.chunk_rows("keys.md")[0]["doc_date"], "2020-01-01")
+        embed = RecordingEmbed()
+        issued = self.indexer(embed=embed, frontmatter_date_keys=("issued",), context_header=True)
+        first = issued.scan(max_files=2, reindex=True)
+        self.assertEqual((first.changed, first.pending), (2, 1))
+        second = issued.scan(max_files=2, reindex=True)
+        self.assertEqual((second.changed, second.pending), (1, 0))
+        self.assertEqual(self.chunk_rows("keys.md")[0]["doc_date"], "2021-02-03")
+        self.assertTrue(any("2021-02-03" in text.split("\n")[0] for text in embed.inputs))
+        done = issued.scan(reindex=True)
+        self.assertEqual((done.changed, done.unchanged, done.pending), (0, 3, 0))
 
     def test_reindex_backfills_metadata_for_legacy_chunks_and_skips_nothing_without_profile(self):
         self.indexer().scan()

@@ -258,13 +258,17 @@ usual result fields; chunks indexed before the migration omit them.
 | Field | Values | Source |
 | --- | --- | --- |
 | `doc_date` | `YYYY-MM-DD` or `null` | Frontmatter date key, a labelled date in the content (for example `Datum:`, `Invoice date:`, `Rechnungsdatum:`), or a date pattern in the file name. Never file mtime or conversion time; birth and due dates are ignored |
-| `category` | `family`, `home`, `finance`, `insurance`, `vehicle`, `health`, `work`, `other` | Path segments first, then keywords (German and English); content keywords need at least two hits |
+| `category` | `family`, `home`, `finance`, `insurance`, `vehicle`, `health`, `work`, `other` | Path segments first, then keywords (German and English); content keywords need at least two hits; ties resolve by fixed precedence (see below) |
 | `ocr_quality` | `0.0`-`1.0` or `null` | Share of plausible words and clean characters; low for symbol noise and digit/letter confusions. Fairly clean text scores above 0.9 |
 | `language` | `de`, `en`, `ru`, `other` | Stop-word and script detection |
 
 Limitations: `ocr_quality` cannot detect subtle letter substitutions that still
 produce word-like tokens; `category` is a keyword heuristic and falls back to
-`other` on ties; dates are only taken when explicitly labelled.
+`other` when nothing matches. When several categories score equally, the
+first in this fixed precedence wins: insurance, vehicle, health, finance, work,
+home, family (for example `versicherung-kfz.md` is `insurance`). Dates are only
+taken when explicitly labelled; labels such as birth, due, valid-until or
+created/modified are skipped, and uncertain cases stay `null`.
 
 ### Migration
 
@@ -288,7 +292,8 @@ stored heading, body and chunk ids are unchanged.
 ### Re-index command
 
 Normal scans skip unchanged files. After changing `DOCUMENTS_CONTEXT_HEADER`
-(or to backfill metadata for existing chunks) run the bounded, resumable
+or `DOCUMENTS_DATE_FRONTMATTER_KEYS` (both are part of the recorded index profile),
+or to backfill metadata for existing chunks, run the bounded, resumable
 re-index; each call processes up to `max_files` files whose recorded index
 profile differs from the current one:
 
