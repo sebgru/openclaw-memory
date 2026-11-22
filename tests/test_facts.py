@@ -1177,6 +1177,48 @@ def test_review2_f1_classifier_handles_blank_keys_and_malformed_targets():
     assert server.private_fact_log_path("/search?q=ordinary") is None
 
 
+@pytest.mark.parametrize("token", ["synthetic-only", None, "wrong"])
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/facts/../private?q=DOT_PRIVATE_MARKER",
+        "/facts/%2e%2e/private?q=ENC_DOT_PRIVATE_MARKER",
+        "/facts/current/../../private?subject=SUBJECT_MARKER",
+        "/%66acts/%2e%2e/private?q=ENC_PREFIX_PRIVATE_MARKER",
+    ],
+)
+def test_review3_private_dot_segment_404_logs(api, caplog, token, enabled, method, path):
+    import logging
+
+    assert server.private_fact_log_path(path) == "/facts/"
+    with (
+        caplog.at_level(logging.INFO, logger="memory_store"),
+        patch.object(server, "FACTS_ENABLED", enabled),
+    ):
+        assert api(method, path, token=token)[0] == 404
+    assert "private fact request path=/facts/" in caplog.text
+    assert "MARKER" not in caplog.text and "?" not in caplog.text
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize(
+    ("path", "status"),
+    [("/unknown?q=UNKNOWN_MARKER", 404), ("/search?limit=ERROR_MARKER", 400)],
+)
+def test_review3_nonprivate_error_access_logs_omit_query(api, caplog, enabled, path, status):
+    import logging
+
+    with (
+        caplog.at_level(logging.INFO, logger="memory_store"),
+        patch.object(server, "FACTS_ENABLED", enabled),
+    ):
+        assert api("GET", path)[0] == status
+    assert caplog.records
+    assert "MARKER" not in caplog.text and "?" not in caplog.text
+
+
 def test_review2_f2_confirmation_ref_secret_rejected_before_file_or_write(store):
     d = store.draft(draft())
     bad = dict(CONFIRM, session_ref="session:synthetic#password:FAKE_ONLY")

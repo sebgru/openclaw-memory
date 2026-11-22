@@ -499,18 +499,19 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool"):
 
 
 def private_fact_log_path(target):
-    """Decode exactly as routing does; never return private query text for logging."""
+    """Classify raw and decoded paths before normalization can remove private prefixes."""
     try:
         parsed = urlparse(target)
-        path = "/" + posixpath.normpath(unquote(parsed.path)).lstrip("/")
+        raw_path = target.split("?", 1)[0]
+        decoded_path = unquote(parsed.path)
+        path = "/" + posixpath.normpath(decoded_path).lstrip("/")
+        paths = (raw_path, unquote(raw_path), parsed.path, decoded_path, path)
         keys = parse_qs(parsed.query, keep_blank_values=True)
     except ValueError:
         # Malformed targets are not safe to echo into access logs either.
         return "/"
-    if (
-        path == "/facts"
-        or path.startswith("/facts/")
-        or any(key.casefold().startswith("fact_") for key in keys)
+    if any(candidate == "/facts" or candidate.startswith("/facts/") for candidate in paths) or any(
+        key.casefold().startswith("fact_") for key in keys
     ):
         known_paths = {
             "/facts/drafts",
@@ -944,16 +945,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(400, {"error": str(exc)})
 
     def log_message(self, format, *args):
-        if FACTS_ENABLED and not hasattr(self, "path"):
+        if not hasattr(self, "path"):
             # parse_request may log the raw request line before setting path.
             logger.info("request rejected before route parsing")
             return
-        path = getattr(self, "path", "")
-        fact_path = private_fact_log_path(path) if FACTS_ENABLED else None
+        # BaseHTTPRequestHandler may rewrite self.path; classify the original target.
+        request_parts = self.requestline.split()
+        target = request_parts[1] if len(request_parts) > 1 else self.path
+        fact_path = private_fact_log_path(target)
         if fact_path is not None:
             logger.info("private fact request path=%s", fact_path)
         else:
-            logger.info("%s - %s", self.address_string(), format % args)
+            # Access/error formats can contain the entire untrusted request line.
+            # Never echo them, including for unknown routes or disabled fact capture.
+            logger.info("%s - HTTP request", self.address_string())
 
 
 if __name__ == "__main__":
