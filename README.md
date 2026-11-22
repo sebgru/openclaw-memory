@@ -323,8 +323,8 @@ To publish a release, bump `version` in `pyproject.toml` on a `chore/release-vX.
 branch, merge that PR to `main`, then tag the merge commit and push the tag:
 
 ```sh
-git tag -a v1.21.0 -m "Release v1.21.0"
-git push origin v1.21.0
+git tag -a v1.22.0 -m "Release v1.22.0"
+git push origin v1.22.0
 ```
 
 ## Development
