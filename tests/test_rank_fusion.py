@@ -538,6 +538,26 @@ class RankFusionTests(unittest.TestCase):
         )
         self.assertEqual(next(i for i, row in enumerate(rows, 1) if row["id"] == "exact"), 10)
 
+    def test_rrf_fuzzy_lane_exposes_engine_rank(self):
+        selected = Mock(spec=["search", "search_fuzzy"])
+        selected.search.return_value = []
+        selected.search_fuzzy.return_value = [hit("typo", fuzzy_terms=["sensor"])]
+        vector = Mock()
+        vector.search.return_value = []
+        with (
+            patch.object(server._search_state, "rank_fusion", True, create=True),
+            patch.object(server.embedder, "embed", return_value=[1]),
+        ):
+            results = server.hybrid_search("sensor", 5, selected, vector)
+        self.assertEqual(results[0]["engine_ranks"], {"fuzzy": 1})
+        self.assertTrue(results[0]["fuzzy_match"])
+
+    def test_access_log_message_includes_client_and_argument(self):
+        handler = Mock(address_string=Mock(return_value="127.0.0.1"))
+        with self.assertLogs("memory_store", level="INFO") as logs:
+            server.Handler.log_message(handler, "%s %s", "GET", "/healthz")
+        self.assertIn("127.0.0.1 - GET /healthz", "\n".join(logs.output))
+
     def test_invalid_config_fails_explicitly(self):
         with patch.dict(os.environ, {"UNIFIED_FUSION_MODE": "mistyped"}):
             with self.assertRaisesRegex(ValueError, "UNIFIED_FUSION_MODE"):
