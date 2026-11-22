@@ -3,15 +3,17 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import sqlite3
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .doc_metadata import DEFAULT_FRONTMATTER_DATE_KEYS
 from .document_indexer import DocumentIndexer, IndexBusyError
 from .embeddings import EmbeddingClient
+from .facts import FactError, FactStore, authorized, token_from_env
 from .fusion import RRF_K, _identities, fuse_scopes
 from .indexer import Indexer
 from .maintenance import database_availability, verify_database
@@ -112,6 +114,29 @@ DOCUMENTS_DATE_FRONTMATTER_KEYS = (
     )
     or DEFAULT_FRONTMATTER_DATE_KEYS
 )
+
+FACTS_ENABLED = os.getenv("MEMORY_FACTS_ENABLED", "false").lower() in {"1", "true", "yes"}
+FACTS_TOKEN = token_from_env(os.environ) if FACTS_ENABLED else ""
+FACTS_PATH = os.getenv("MEMORY_FACTS_SQLITE_PATH", "/data/facts.db")
+if FACTS_ENABLED and not os.path.isabs(FACTS_PATH):
+    raise ValueError("fact database path must be absolute")
+if FACTS_ENABLED and os.path.realpath(FACTS_PATH) in {
+    os.path.realpath(os.getenv(name, default))
+    for name, default in (
+        ("SQLITE_PATH", "memory.db"),
+        ("ARCHIVE_SQLITE_PATH", "archive.db"),
+        ("DOCUMENTS_SQLITE_PATH", "documents.db"),
+    )
+}:
+    raise ValueError("fact database must be separate from index databases")
+fact_store = FactStore(
+    FACTS_PATH,
+    enabled=FACTS_ENABLED,
+    recency_days=int(os.getenv("MEMORY_FACTS_RECENCY_DAYS", "60")) if FACTS_ENABLED else 60,
+    timezone=os.getenv("MEMORY_FACTS_TIMEZONE", "UTC") if FACTS_ENABLED else "UTC",
+)
+if FACTS_ENABLED and not FACTS_TOKEN:
+    logger.warning("facts enabled without a token; all fact endpoints fail closed")
 
 
 _DEFAULT_VECTOR = object()
@@ -619,6 +644,33 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool", *, d
     return selected, warnings, coverage, degraded
 
 
+def private_fact_log_path(target):
+    """Classify raw and decoded paths before normalization can remove private prefixes."""
+    try:
+        parsed = urlparse(target)
+        raw_path = target.split("?", 1)[0]
+        decoded_path = unquote(parsed.path)
+        path = "/" + posixpath.normpath(decoded_path).lstrip("/")
+        paths = (raw_path, unquote(raw_path), parsed.path, decoded_path, path)
+        keys = parse_qs(parsed.query, keep_blank_values=True)
+    except ValueError:
+        # Malformed targets are not safe to echo into access logs either.
+        return "/"
+    if any(candidate == "/facts" or candidate.startswith("/facts/") for candidate in paths) or any(
+        key.casefold().startswith("fact_") for key in keys
+    ):
+        known_paths = {
+            "/facts/drafts",
+            "/facts/confirm",
+            "/facts/end",
+            "/facts/retract",
+            "/facts/current",
+            "/unified/search",
+        }
+        return path if path in known_paths else "/facts/"
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, code, payload):
         data = json.dumps(payload).encode()
@@ -628,9 +680,75 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def facts_authorized(self):
+        if not FACTS_TOKEN:
+            self.send_json(503, {"error": "fact authentication unavailable"})
+            return False
+        if not authorized(self.headers.get("Authorization"), FACTS_TOKEN):
+            self.send_json(401, {"error": "fact authentication required"})
+            return False
+        return True
+
+    def current_fact(self, params):
+        subject = params.get("subject", [""])[0]
+        predicate = params.get("predicate", [""])[0]
+        if not subject or not predicate:
+            raise FactError("subject and predicate are required")
+        return fact_store.read(
+            subject,
+            predicate,
+            params.get("item_key", [None])[0],
+            params.get("as_of", [None])[0],
+            params.get("include_history", ["false"])[0] == "true",
+        )
+
+    def facts_post(self):
+        if not self.facts_authorized():
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 16384:
+                raise FactError("invalid fact request size")
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                raise FactError("invalid fact request")
+            if self.path == "/facts/confirm":
+                if set(payload) != {"draft_id", "confirmation"}:
+                    raise FactError("draft_id and confirmation are required")
+                if not isinstance(payload["draft_id"], str):
+                    raise FactError("invalid draft id")
+                result = fact_store.confirm(payload["draft_id"], payload["confirmation"])
+            else:
+                expected = {"/facts/end": "end", "/facts/retract": "retract"}.get(self.path)
+                if expected and payload.get("action") != expected:
+                    raise FactError("action does not match endpoint")
+                result = fact_store.draft(payload)
+            return self.send_json(200, result)
+        except (ValueError, TypeError, KeyError, RecursionError):
+            return self.send_json(400, {"error": "invalid or expired fact capture"})
+        except (OSError, sqlite3.Error):
+            return self.send_json(503, {"error": "fact store unavailable"})
+
     def do_GET(self):
         started = time.monotonic()
         parsed, params = urlparse(self.path), parse_qs(urlparse(self.path).query)
+        if FACTS_ENABLED and parsed.path == "/facts/current":
+            if not self.facts_authorized():
+                return
+            try:
+                return self.send_json(200, self.current_fact(params))
+            except FactError:
+                return self.send_json(400, {"error": "invalid fact lookup"})
+            except (OSError, sqlite3.Error):
+                return self.send_json(
+                    503,
+                    {
+                        "subject": params.get("subject", [""])[0],
+                        "predicate": params.get("predicate", [""])[0],
+                        "state": "unavailable",
+                        "disclosures": ["partial_lane_unavailable"],
+                    },
+                )
         if parsed.path == "/healthz":
             availability = database_availability(
                 store.db.execute("PRAGMA database_list").fetchone()[2]
@@ -802,6 +920,28 @@ class Handler(BaseHTTPRequestHandler):
                     503, {"error": "search backend unavailable", "detail": str(exc)}
                 )
         if parsed.path == "/unified/search":
+            current_state = None
+            if FACTS_ENABLED and ("fact_subject" in params or "fact_predicate" in params):
+                if not self.facts_authorized():
+                    return
+                fact_params = {
+                    key.removeprefix("fact_"): value
+                    for key, value in params.items()
+                    if key.startswith("fact_")
+                }
+                try:
+                    current_state = [self.current_fact(fact_params)]
+                except FactError:
+                    return self.send_json(400, {"error": "invalid fact lookup"})
+                except (OSError, sqlite3.Error):
+                    current_state = [
+                        {
+                            "subject": fact_params.get("subject", [""])[0],
+                            "predicate": fact_params.get("predicate", [""])[0],
+                            "state": "unavailable",
+                            "disclosures": ["partial_lane_unavailable"],
+                        }
+                    ]
             query = params.get("q", [""])[0]
             scope = params.get("scope", ["all"])[0]
             profile = params.get("profile", ["tool"])[0]
@@ -843,17 +983,17 @@ class Handler(BaseHTTPRequestHandler):
                 len(warnings),
                 (time.monotonic() - started) * 1000,
             )
-            debug = params.get("debug", ["0"])[0] == "1"
             if not debug:
                 results = [
                     {key: value for key, value in item.items() if key != "fusion_debug"}
                     for item in results
                 ]
-            payload = {
-                "results": results,
-                "coverage": coverage,
-                "fusion": os.getenv("UNIFIED_FUSION_MODE", "legacy").strip().lower(),
-            }
+            payload: dict = {"current_state": current_state} if current_state is not None else {}
+            payload.update(
+                results=results,
+                coverage=coverage,
+                fusion=os.getenv("UNIFIED_FUSION_MODE", "legacy").strip().lower(),
+            )
             if degraded:
                 payload["degraded"] = degraded
             if warnings:
@@ -869,6 +1009,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        if FACTS_ENABLED and self.path in {
+            "/facts/drafts",
+            "/facts/confirm",
+            "/facts/end",
+            "/facts/retract",
+        }:
+            return self.facts_post()
         if self.path in ("/reconcile", "/archive/reconcile", "/documents/reconcile"):
             is_archive = self.path.startswith("/archive/")
             is_documents = self.path.startswith("/documents/")
@@ -966,6 +1113,17 @@ class Handler(BaseHTTPRequestHandler):
     def log_request(self, code="-", size="-"):
         # BaseHTTPRequestHandler otherwise logs the complete request/query.
         # Malformed request lines can reach this before path/command are set.
+        if not hasattr(self, "path"):
+            logger.info("request rejected before route parsing")
+            return
+        # BaseHTTPRequestHandler may rewrite self.path; classify the original
+        # target so private fact lookups always collapse to their route bucket.
+        request_parts = getattr(self, "requestline", "").split()
+        target = request_parts[1] if len(request_parts) > 1 else self.path
+        fact_path = private_fact_log_path(target)
+        if fact_path is not None:
+            logger.info("private fact request path=%s", fact_path)
+            return
         path = getattr(self, "path", "").split("?", 1)[0]
         logger.info("http path=%s status=%s size=%s", path, code, size)
 
