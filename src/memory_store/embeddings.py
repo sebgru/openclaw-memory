@@ -53,19 +53,17 @@ class EmbeddingClient:
                 if attempt < self.MAX_RETRIES - 1:
                     delay = self.RETRY_BACKOFF * (2**attempt)
                     logger.warning(
-                        "embedding attempt %d/%d failed for %r: %s; retrying in %.1fs",
+                        "embedding attempt %d/%d failed (%s); retrying in %.1fs",
                         attempt + 1,
                         self.MAX_RETRIES,
-                        text[:60],
-                        exc,
+                        type(exc).__name__,
                         delay,
                     )
                     time.sleep(delay)
         # All remote attempts failed; fall back to deterministic hash embedding.
         logger.warning(
-            "embedding service unavailable after %d attempts; using hash fallback for %r",
+            "embedding service unavailable after %d attempts; using hash fallback",
             self.MAX_RETRIES,
-            text[:60],
         )
         if self.dimensions < 8:
             # hash_embedding requires dimensions >= 8; use simple deterministic fallback.

@@ -36,6 +36,7 @@ For a tiered memory layout, including a separate historical session archive and 
 | `ARCHIVE_ROOT` | unset | Enables the archive API; separate SQLite/Qdrant collections |
 | `ARCHIVE_SQLITE_PATH` | `archive.db` | SQLite database for the archive index |
 | `ARCHIVE_QDRANT_COLLECTION` | `memory-archive` | Qdrant collection for the archive index |
+| `UNIFIED_FUSION_MODE` | `legacy` | `rrf` enables rank-only within/across-scope fusion, tier prior, metadata adjustments and canonical dedup; see [Rank fusion](docs/RANK_FUSION.md). Legacy remains default pending owner-labelled evaluation and consumer audit; tier rank offsets are 0/1/2/4 |
 | `PROMPT_MIN_RELEVANCE` | `0.2` | Minimum normalized evidence score for `profile=prompt` |
 | `PROMPT_MEMORY_QUOTA` | `3` | Maximum memory results in the prompt profile |
 | `PROMPT_ARTIFACT_QUOTA` | `1` | Maximum artifact results in the prompt profile |
@@ -77,6 +78,20 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 
 ## API
 
+### Compatibility changes, including legacy mode
+
+`legacy` remains the default ranking algorithm and preserves the pre-E.2
+`low_confidence` behaviour: evaluate only the delivered rows, after profile
+filtering/quotas and result truncation. Only `UNIFIED_FUSION_MODE=rrf` evaluates
+confidence over the full fused candidate set before those steps. In RRF a weak
+first row can therefore omit `low_confidence` when a strong candidate lies beyond
+the limit. The confidence floor is unchanged. Query-log hardening applies to
+both modes, including malformed HTTP requests.
+
+Unified responses include `fusion: "legacy"|"rrf"`; `score` is an opaque ordering key and is not comparable across modes. Low confidence is computed before profile quotas and result truncation only in RRF mode. Unified search supports an opt-in [rank fusion mode](docs/RANK_FUSION.md). Add
+`debug=1` to return numeric engine, candidate-legacy, pre/post-fusion and post-profile ranks in each result's `fusion_debug`
+field in that mode. Queries and candidate text are not logged by this path.
+
 - `POST /index` scans and incrementally indexes Markdown files; response includes added, changed, removed, and unchanged counts.
 - `GET /search?q=...&limit=10` returns ranked results combining FTS5 and vector scores.
 - `GET /unified/search?q=...&limit=10&scope=all&profile=tool` searches the main index and,
@@ -100,7 +115,7 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
   also adds `<source>: not configured`, so clients that ignore `coverage`
   still see the gap. Clients that ignore unknown fields are unaffected.
 - `/unified/search` adds `low_confidence: true` and a `confidence_note` when no result has lexical or exact evidence and every semantic similarity is below `LOW_CONFIDENCE_SEMANTIC_FLOOR` (default 0.6), i.e. the query probably has no relevant match. Results are still returned. Queries whose terms all appear in a chunk (two or more terms) get `FULL_COVERAGE_BOOST` (default 1.0) so multi-identifier lexical matches rank above semantic-only hits.
-- When `NIMBLE_RERANK_URL` is configured, `/unified/search` may reorder only the bounded non-exact candidates using the `nimble:9b` `/v1/systemone` relevance choice. Exact matches retain their baseline order and precedence. Any timeout, transport/HTTP error, or invalid Nimble response discards partial scores and returns the untouched baseline results; coverage, provenance, scores, and confidence fields are not recalculated. This option does not alter the confidence floor. Keep it unset to disable reranking.
+- In legacy mode, when `NIMBLE_RERANK_URL` is configured, `/unified/search` may reorder only the bounded non-exact candidates using the `nimble:9b` `/v1/systemone` relevance choice. Exact matches retain their baseline order and precedence. Any timeout, transport/HTTP error, or invalid Nimble response discards partial scores and returns the untouched baseline results; coverage, provenance, scores, and confidence fields are not recalculated. This option does not alter the confidence floor. Keep it unset to disable reranking. In RRF mode, canonical groups are selected before Nimble and its within-scope order is then fused using the soft rank offsets; final `score` values are recalculated (see the rank-fusion documentation).
 - `profile=tool` preserves the broad, backward-compatible result set.
   `profile=prompt` applies normalized evidence thresholds and per-source quotas
   so automatic recall cannot be dominated by one corpus. Thresholds apply to
@@ -177,7 +192,7 @@ override to inherit future safe defaults.
 
 ## Logging
 
-The service logs to stdout: startup configuration, HTTP access lines, search outcomes (query, limit, result count, latency), index outcomes (added/changed/removed/unchanged counts), per-file indexer decisions, and errors with tracebacks. `LOG_LEVEL` controls verbosity (`INFO` by default; set `DEBUG` to also log unchanged files during indexing). Semantic-search failures that fall back to FTS5 are logged as warnings and, on `/unified/search`, surfaced in `warnings`.
+The service logs to stdout: startup configuration, HTTP access lines (without query strings), search outcomes (limit, result count, latency), index outcomes (added/changed/removed/unchanged counts), per-file indexer decisions, and errors with tracebacks. `LOG_LEVEL` controls verbosity (`INFO` by default; set `DEBUG` to also log unchanged files during indexing). Malformed HTTP requests log a generic rejection without raw request text. Semantic-search failures that fall back to FTS5 are logged as warnings and, on `/unified/search`, surfaced in `warnings`.
 
 When Qdrant is configured, SQLite remains the durable source of indexed state and Qdrant is updated after each SQLite commit. The two systems do not share a transaction; a failed Qdrant request can therefore leave semantic results temporarily stale. `/status` exposes full parity diagnostics; routine `/documents/status` and `/archive/status` use sampled vector diagnostics and omit expensive whole-database integrity, chunk-count, and FTS-parity scans (`integrity: not_checked`, chunk/parity fields are null or marked sampled). The smaller file count remains exact. Run the explicit database `verify` command for a full integrity check. Use the explicit, locked reconciliation endpoint to add missing points; it never deletes points. Search falls back to SQLite FTS5 during a Qdrant or embedding outage. `/unified/search` reports this per source as a warning (coverage stays `searched`).
 
