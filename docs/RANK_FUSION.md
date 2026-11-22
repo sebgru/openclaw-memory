@@ -1,107 +1,120 @@
 # Unified rank fusion
 
-`UNIFIED_FUSION_MODE=rrf` replaces raw-score fusion for `/unified/search` only.
-`UNIFIED_FUSION_MODE=legacy` is the default and rollback setting. No schema,
-ingestion, model, index or deployment changes are required. Unknown values fail
-explicitly. `/search`, `/archive/search` and `/documents/search` keep their
-existing scoring contract.
+`UNIFIED_FUSION_MODE=rrf` selects rank-only scoring for `/unified/search`.
+`legacy` remains the default and rollback. No ingestion/schema/configuration
+changes are required. Invalid values produce a JSON HTTP 500 (library calls
+raise `ValueError`), not a dropped connection. Every successful unified response
+has `fusion: "legacy"|"rrf"`. In both modes `score` is an opaque **ordering key**,
+not a relevance probability; never compare scores between modes or requests.
+Other search endpoints retain their legacy numeric scoring contract.
 
-## Algorithm
+## Formula and scope mapping
 
-1. Retrieve lexical, exact, fuzzy and vector candidates in every selected scope.
-   Identifier-like queries still run lexical **and** vector retrieval; there is
-   no identifier-only routing shortcut. Vector failures retain lexical fallback,
-   warnings and coverage/degraded fields.
-2. Within each scope, combine lexical and semantic ranks using `1/(60+rank)`
-   (one-based ranks), plus the existing bounded fuzzy rank contribution. Raw
-   vector similarity is retained for confidence, not added to the ranking score.
-   Exact/term-coverage promotion is converted to rank units (`bonus/61`), using
-   the existing configurable lexical weights.
-3. When Nimble is configured, interleave scope ranks for its candidate prefix
-   and make one bounded reranking call across candidates;
-   use its relative order **within** each scope only. It cannot bypass the final
-   cross-scope prior. Its existing deadline, cap and fallback remain unchanged.
-4. Collapse duplicate groups; combine distinct scope ranks by RRF. Multiple
-   copies in one scope contribute only their best rank, not extra votes.
-5. Add `(tier_prior + metadata_adjustment - copy_penalty)/60`. Stable IDs break
-   ties deterministically. Apply existing prompt relevance gates/quotas or tool
-   result limit after fusion.
+1. Every scope retrieves lexical/exact, fuzzy and vector candidates. Identifier
+   queries still run both lexical and vector search. Semantic failures disclose
+   lexical fallback in warnings/coverage/degraded fields.
+2. Within a scope, sum one-based `1/(60+rank)` lexical/vector votes, the bounded
+   fuzzy contribution, and existing exact/term promotion expressed as
+   `bonus/(60+1)`. Vector similarity is retained only as confidence evidence.
+3. Group duplicates **before** Nimble. Interleave canonical scope ranks for its
+   tier-agnostic bounded prefix, skipping groups already selected. Make one
+   bounded call and use its order within each scope. Original members remain
+   available for final evidence/provenance aggregation.
+4. For a group with best rank `r_s` in scope `s`, final score is:
+   `sum_s 1/(60 + r_s + tier_offset - metadata_bonus + copy_offset)`.
+   Copies in the same scope contribute only the best rank. Distinct scopes vote
+   once each. Most corpora are disjoint: for these rows cross-scope RRF is
+   positional interleaving, not additional independent semantic evidence.
+5. Break ties by tier, best scope rank, path and ID. Compute low confidence over
+   the **full fused list**, then apply prompt relevance gates/quotas and limit.
 
-| Current scope/source mapping | Prior |
-| --- | ---: |
-| Main memory (including curated files, knowledge/notes, projects) and outputs/artifacts | 4 |
-| Main sessions; archive sessions dated within the last 30 days | 3 |
-| Other/undated archive material | 2 |
-| Documents | 1 |
+| Source (current mapping) | Tier | Rank offset |
+| --- | --- | ---: |
+| Main memory, knowledge/notes, projects, outputs/artifacts | T0 | 0 |
+| Main sessions; archive dated within the past 30 days | T1 | 1 |
+| Other/undated archive | T2 | 2 |
+| Documents | documents | 4 |
 
-This is a **soft prior**, not unconditional truth precedence or a conflict
-resolver. Independent multi-scope evidence can outweigh a one-tier difference.
-Main scope is not fine-grained enough to distinguish T0 facts from all notes;
-outputs/projects retain its existing main mapping. Date recognition for archive
-sessions uses optional `doc_date`, then `session_date`, then ISO dates from
-existing transcript headings or provenance paths. Undated archive content stays
-T2; filesystem modification time is never used. Future dates do not imply T1.
+Offsets are a deliberately small, uncalibrated **soft prior in rank units**.
+With one scope vote each and neutral metadata, document rank 1 has the score of
+memory rank 5: memory rank 3 wins, but document rank 1 beats memory rank 6 (and
+10). The equal-score boundary favours the higher tier. Multiple independent
+scope votes can exceed a tier difference. Main does not distinguish curated
+facts from every other note; this is neither truth precedence nor supersession.
+Archive date recognition uses optional `doc_date`, then `session_date`, then ISO
+dates in existing headings/paths. Future dates are not recent sessions. UTC date
+is computed once per fusion call and is injectable for deterministic tests.
 
-For documents, valid ISO `doc_date` adds `0.25/(1+age_days/365)` (future dates are
-clamped to age zero). Numeric finite `ocr_quality` is clamped to [0,1] and adds
-`-0.25*(1-quality)`. Fields may be top-level or in `metadata`; missing/invalid
-values are neutral. Missing dates do not become fabricated dates. These are
-bounded heuristics, not measured calibration or supersession labels.
+### Optional metadata
 
-## Canonicalization
+Document dates between 1900-01-01 and today's UTC date add the rank bonus
+`1/(1+age_days/365)-0.5`: one-year-old is neutral, newest approaches +0.5,
+and old approaches -0.5. Future/implausible/invalid dates are missing, not new.
+Finite `ocr_quality` in [0,1] adds
+`clamp((quality-0.9)*5, -0.5, 0.5)`: measured quality 0.9 and unknown are both
+neutral. Each field moves at most half a rank; combined magnitude is at most one
+rank. This is intended as small document-within-tier adjustment, not a measured
+quality calibration. Missing values do not fabricate dates or imply infinite
+age; top-level fields and nested `metadata` are supported.
 
-Equal optional chunk `content_hash`, or equal case/whitespace-normalized chunk
-text, forms a duplicate group across scopes. Normalized path copies also group
-when heading and line coordinates match. Different chunks in a document are
-not collapsed solely because their file path is equal. Relative document paths
-are namespaced separately from workspace paths to avoid basename collisions.
+## Conservative canonicalization
 
-Known backup/trim/copies directories, `.bak`/`.backup` suffixes, and
-`-copy`/`-backup`/`-trim` or `(copy N)` stem suffixes are recognized. A retrieved
-canonical path wins over its copies regardless of their original rank; canonical
-text, confidence evidence and provenance are retained, with other provenance in
-`alternate_provenance`. Unmatched copies receive a rank penalty of 1. A
-`canonical_of` pointer also marks a non-canonical candidate. This does not read
-or remove files, resolve a pointer to fetch absent canonical content, or compare
-arbitrarily shifted chunks semantically. Query-time dedup cannot recover a
-canonical candidate that retrieval never returned. Index hygiene remains needed.
+An explicit equal chunk `content_hash` groups duplicates. Bare normalized text
+alone groups only session/archive rows and only for at least 80 characters.
+Identical boilerplate chunks in different documents or ordinary notes are not
+merged just because the text matches. Copy-normalized path + heading + line must
+also have **equal normalized text**; different versions such as `q3.md` and
+`q3-trim.md` with different content remain distinct. Document and workspace
+relative paths are separate namespaces. This intentionally misses some rewritten
+or shifted copies rather than hiding distinct sources.
 
-## Confidence and debug privacy
+Known backup/trim/copies directories, `.bak`/`.backup`, `-copy`/`-backup`/`-trim`
+and `(copy N)` patterns identify copy candidates, not sufficient merge evidence.
+A retrieved canonical path wins over a copy; canonical text is retained, while
+`lexical_evidence`, `semantic_similarity`, and `relevance_score` are max-merged
+and `exact_match` is OR-ed across all members. Alternate provenance is retained.
+An unmatched copy or `canonical_of` marker costs **3 rank positions**. Nothing
+reads/modifies files or fetches an absent canonical source. Optional hashes are
+assumed to identify chunks, not whole multi-chunk files.
 
-Rank-prior scores are **not relevance probabilities**. `lexical_evidence`,
-`semantic_similarity`, `exact_match` and `relevance_score` remain evidence fields;
-low-confidence flagging and prompt thresholds use them, not fused scores.
-Empty-result handling is unchanged. No-match is not a claim of nonexistence.
+## Debug and privacy
 
-Add `debug=1` to `/unified/search` to include a per-result `fusion_debug` object:
+HTTP `debug=1`, or `unified_search_with_coverage(..., debug=True)`, returns
+`fusion_debug` in RRF mode. Library and HTTP defaults strip it; legacy debug is
+harmless and has no fusion object. Fields contain no query, snippets, paths or
+hashes:
 
-```json
-{
-  "scope_ranks": {"main": 2, "archive": 1},
-  "rrf_score": 0.03252247488101534,
-  "tier_prior": 4.0,
-  "metadata_adjustment": 0.0,
-  "copy_penalty": 0.0,
-  "duplicates_collapsed": 1,
-  "post_fusion_rank": 1
-}
-```
+- `engine_ranks`: lexical/vector/fuzzy ranks from the retrieved group members,
+  before Nimble (numeric ranks only).
+- `scope_ranks`: scope ranks after Nimble and before cross-scope fusion.
+- `legacy_candidate_rank`: pre-Nimble raw legacy-style order **over the same
+  retrieved candidate pool**, not an end-to-end shadow legacy request. It cannot
+  reveal candidates already pruned by RRF retrieval or reproduce legacy duplicate
+  score summing. Null means the row lacks identity evidence to correlate it.
+- `rrf_score`: unadjusted scope-vote sum; `tier_prior`: diagnostic tier label
+  4/3/2/1; `rank_offset`: actual offset; `metadata_adjustment`, `copy_penalty`,
+  `duplicates_collapsed`: component diagnostics.
+- `post_fusion_rank`: before profile/limit; `post_profile_rank`: contiguous rank
+  in the delivered list (the first may have gaps, the second does not).
 
-Scope ranks are before cross-scope fusion (after any within-scope Nimble order),
-and post-fusion rank is before prompt quota/limit filtering. Debug contains only
-scope names, ranks/counts and numeric adjustments; it contains no query, snippet,
-path or hash. It is returned to the caller, never logged. Results themselves
-retain their normal private provenance. HTTP access logs omit query strings;
-unified timing logs omit query text. Embedding retries/fallbacks and unified
-backend fallback logs omit text and exception content.
+Confidence uses evidence fields, never rank scores, and is captured before
+profile filtering/truncation. Empty-result behaviour is unchanged. The tuple
+library API is unchanged; the HTTP layer consumes request-thread confidence.
 
-## Rollout gate
+Privacy hardening is intentionally shared by legacy and RRF: HTTP access logs
+omit query strings, and unified **and scope-specific** timing logs omit queries.
+Embedding retries/fallback and unified backend failures omit exception content.
+This does not promise redaction of arbitrary failures elsewhere in the service;
+result provenance remains private response data, not log data.
 
-The default remains **legacy**: existing consumers/tests assert unchanged legacy
-numeric scores and Nimble's reorder-only result contract. Running the existing
-suite with `UNIFIED_FUSION_MODE=rrf` exposes those three compatibility assertions.
-The normal full suite passes with the new mode covered explicitly by synthetic
-unit/API tests. Enabling a new default must wait for a deliberate score-contract
-migration and a passing full suite under that default. Do not interpret opt-in
-unit tests or a candidate-only offline replay as deployment approval or an
-end-to-end relevance gain. No production configuration is changed by this work.
+## Rollout and evaluation gate
+
+Both default and forced-RRF suites must pass. Legacy score-contract tests are
+mode-aware: legacy numeric assertions remain, while RRF asserts order, evidence
+and provenance instead of unchanged raw scores. Legacy is still the default.
+Default promotion also needs downstream score-consumer audit and an owner-labelled
+end-to-end comparison (recall@10, MRR, regressions, dedup precision, latency with
+and without Nimble). A candidate-limited reconstruction from saved responses is
+only diagnostic: it exercises actual within-scope code but cannot recover
+missing engine candidates or original rank gaps, establish owner relevance, or
+measure service/Nimble latency. It is not production activation approval.

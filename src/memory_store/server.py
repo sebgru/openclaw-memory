@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .document_indexer import DocumentIndexer, IndexBusyError
 from .embeddings import EmbeddingClient
-from .fusion import fuse_scopes
+from .fusion import RRF_K, _identities, fuse_scopes
 from .indexer import Indexer
 from .maintenance import database_availability, verify_database
 from .nimble import rerank as nimble_rerank
@@ -166,7 +166,7 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
     # SQLite rows carry raw chunk IDs while Qdrant hits carry UUID5 point IDs;
     # key lexical rows by their point ID so both backends fuse on one identity.
     for rank, row in enumerate(lexical):
-        score = 1 / (60 + rank + 1)
+        score = 1 / (RRF_K + rank + 1)
         item = merged.setdefault(
             point_id(row["id"]),
             {
@@ -179,6 +179,8 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
             },
         )
         item["score"] += score
+        if rank_fusion:
+            item.setdefault("engine_ranks", {})["lexical"] = rank + 1
         item["lexical_score"] += score
         item["lexical_evidence"] = max(item["lexical_evidence"], row.get("score", 0))
     # Typo-tolerant candidates are kept distinct from true lexical evidence:
@@ -187,7 +189,7 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
     for rank, row in enumerate(fuzzy):
         # Rank-based, same scale as the lexical/semantic contributions, so a
         # typo candidate can never outweigh an exact or lexical match.
-        fuzzy_rank_score = FUZZY_RANK_WEIGHT / (60 + rank + 1)
+        fuzzy_rank_score = FUZZY_RANK_WEIGHT / (RRF_K + rank + 1)
         item = merged.setdefault(
             point_id(row["id"]),
             {
@@ -207,9 +209,11 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         item["fuzzy_terms"] = sorted(
             set(item.get("fuzzy_terms", [])) | set(row.get("fuzzy_terms", []))
         )
+        if rank_fusion:
+            item.setdefault("engine_ranks", {})["fuzzy"] = rank + 1
         item["score"] += fuzzy_rank_score
     for rank, row in enumerate(semantic):
-        score = 1 / (60 + rank + 1)
+        score = 1 / (RRF_K + rank + 1)
         item = merged.setdefault(
             row["id"],
             {
@@ -226,6 +230,8 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
             },
         )
         item["score"] += score
+        if rank_fusion:
+            item.setdefault("engine_ranks", {})["vector"] = rank + 1
         item["semantic_score"] += score
         item["semantic_similarity"] = max(item["semantic_similarity"], row.get("score", 0))
     for item in merged.values():
@@ -238,10 +244,27 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         item["relevance_score"] = max(lexical_relevance, semantic_relevance)
         bonus, exact = exact_match_bonus(query, item, item.get("fuzzy_terms", []))
         item["exact_match"] = exact
-        item["score"] += bonus / 61 if rank_fusion else bonus
+        item["score"] += bonus / (RRF_K + 1) if rank_fusion else bonus
+        if rank_fusion:
+            item["legacy_candidate_score"] = (
+                item["lexical_score"]
+                + item["semantic_score"]
+                + item.get("fuzzy_score", 0)
+                + bonus
+                + (
+                    item["semantic_similarity"]
+                    if not item["lexical_score"] and not item.get("fuzzy_match")
+                    else 0
+                )
+            )
     return [
         annotate_result(item)
-        for item in sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
+        for item in sorted(
+            merged.values(),
+            key=(lambda x: (-x["score"], str(x.get("path", "")), str(x["id"])))
+            if rank_fusion
+            else (lambda x: (-x["score"],)),
+        )[:limit]
     ]
 
 
@@ -387,7 +410,7 @@ def unified_search(query, limit, scope="all", profile="tool"):
     return results, warnings
 
 
-def unified_search_with_coverage(query, limit, scope="all", profile="tool"):
+def unified_search_with_coverage(query, limit, scope="all", profile="tool", *, debug=False):
     """Search the configured indexes and report what was actually searched.
 
     Returns ``(results, warnings, coverage, degraded)``. ``degraded`` maps a searched
@@ -454,15 +477,16 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool"):
         for row in rows:
             source = unified_source(row, archive=is_archive, document=is_document)
             result_id = unified_result_id(row, source)
-            lane.append(
-                {
-                    **row,
-                    "id": result_id,
-                    "source": source,
-                    "provenance": result_provenance(row, source),
-                    "alternate_provenance": [],
-                }
-            )
+            if mode == "rrf":
+                lane.append(
+                    {
+                        **row,
+                        "id": result_id,
+                        "source": source,
+                        "provenance": result_provenance(row, source),
+                        "alternate_provenance": [],
+                    }
+                )
             if mode == "rrf":
                 continue
             item = merged.setdefault(
@@ -491,22 +515,67 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool"):
             for field in ("lexical_evidence", "semantic_similarity", "relevance_score"):
                 item[field] = max(item[field], row.get(field, 0))
 
-        lanes.append((name, lane))
+        if mode == "rrf":
+            lanes.append((name, lane))
 
     if mode == "rrf":
         # Nimble supplies an optional within-scope rank, never a cross-scope score.
         # One bounded call retains its request deadline/candidate cap.
         # Interleave scope ranks so the bounded prefix is not main-only.
-        ranked = [(rank, row) for _, lane in lanes for rank, row in enumerate(lane)]
-        candidates = [row for _, row in sorted(ranked, key=lambda pair: pair[0])]
+        # Dedup before Nimble so copies do not consume its bounded prefix.
+        legacy_candidates = sorted(
+            [row for _, lane in lanes for row in lane],
+            key=lambda row: -row.get("legacy_candidate_score", row["score"]),
+        )
+        legacy_ranks: dict[tuple, int] = {}
+        for rank, row in enumerate(legacy_candidates, 1):
+            for key in _identities(row):
+                legacy_ranks.setdefault(key, rank)
+        canonical = fuse_scopes(lanes)
+        canonical_lanes = []
+        for name, _ in lanes:
+            lane = [row for row in canonical if name in row["fusion_debug"]["scope_ranks"]]
+            lane.sort(key=lambda row: row["fusion_debug"]["scope_ranks"][name])
+            canonical_lanes.append((name, lane))
+        ranked = [(rank, row) for _, lane in canonical_lanes for rank, row in enumerate(lane)]
+        candidates = []
+        seen = set()
+        for _, row in sorted(ranked, key=lambda pair: pair[0]):
+            if id(row) not in seen:
+                candidates.append(row)
+                seen.add(id(row))
         reranked = nimble_rerank(query, candidates)
         order = {id(row): rank for rank, row in enumerate(reranked)}
-        lanes = [(name, sorted(lane, key=lambda row: order[id(row)])) for name, lane in lanes]
+        # Reorder original members by their canonical group's Nimble rank while
+        # retaining all evidence/provenance for the final grouping.
+        owner = {}
+        for row in canonical:
+            for key in _identities(row):
+                owner[key] = order[id(row)]
+
+        def rerank_key(row):
+            return min((owner[key] for key in _identities(row) if key in owner), default=len(order))
+
+        lanes = [(name, sorted(lane, key=rerank_key)) for name, lane in lanes]
         results = fuse_scopes(lanes)
+        for item in results:
+            item["fusion_debug"]["legacy_candidate_rank"] = min(
+                (legacy_ranks[key] for key in _identities(item) if key in legacy_ranks),
+                default=None,
+            )
     else:
         results = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
         results = nimble_rerank(query, results)
-    return apply_search_profile(results, limit, profile), warnings, coverage, degraded
+    _search_state.low_confidence = is_low_confidence(results)
+    selected = apply_search_profile(results, limit, profile)
+    for rank, item in enumerate(selected, 1):
+        if debug and "fusion_debug" in item:
+            item["fusion_debug"]["post_profile_rank"] = rank
+        item.pop("legacy_candidate_score", None)
+        item.pop("engine_ranks", None)
+        if not debug:
+            item.pop("fusion_debug", None)
+    return selected, warnings, coverage, degraded
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -679,9 +748,8 @@ class Handler(BaseHTTPRequestHandler):
                 if is_documents:
                     results = [{**row, "source": "document"} for row in results]
                 logger.info(
-                    "%s q=%r limit=%d results=%d took=%.1fms",
+                    "%s limit=%d results=%d took=%.1fms",
                     parsed.path,
-                    query,
                     limit,
                     len(results),
                     (time.monotonic() - started) * 1000,
@@ -710,14 +778,18 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if profile not in {"tool", "prompt"}:
                 return self.send_json(400, {"error": "profile must be one of tool, prompt"})
+            _search_state.low_confidence = None
+            debug = params.get("debug", ["0"])[0] == "1"
             try:
                 # Keep the long-standing three-argument call shape for the
                 # default profile; callers and test doubles remain compatible.
                 results, warnings, coverage, degraded = (
                     unified_search_with_coverage(query, limit, scope)
-                    if profile == "tool"
-                    else unified_search_with_coverage(query, limit, scope, profile)
+                    if profile == "tool" and not debug
+                    else unified_search_with_coverage(query, limit, scope, profile, debug=debug)
                 )
+            except ValueError:
+                return self.send_json(500, {"error": "invalid unified search configuration"})
             except LookupError as exc:
                 return self.send_json(404, {"error": str(exc)})
             logger.info(
@@ -735,12 +807,17 @@ class Handler(BaseHTTPRequestHandler):
                     {key: value for key, value in item.items() if key != "fusion_debug"}
                     for item in results
                 ]
-            payload = {"results": results, "coverage": coverage}
+            payload = {
+                "results": results,
+                "coverage": coverage,
+                "fusion": os.getenv("UNIFIED_FUSION_MODE", "legacy").strip().lower(),
+            }
             if degraded:
                 payload["degraded"] = degraded
             if warnings:
                 payload["warnings"] = warnings
-            if is_low_confidence(results):
+            confidence = getattr(_search_state, "low_confidence", None)
+            if confidence if confidence is not None else is_low_confidence(results):
                 payload["low_confidence"] = True
                 payload["confidence_note"] = (
                     "no lexical match and weak semantic similarity; "

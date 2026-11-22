@@ -7,7 +7,7 @@ from file mtime. This is not a temporal fact/conflict resolver.
 import hashlib
 import math
 import re
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -78,7 +78,7 @@ def tier_prior(row, today=None):
     Main memory has a higher prior than archive; recent dated sessions get T1.
     Unknown/old archive stays T2. Document dates never imply curated authority.
     """
-    today = today or date.today()
+    today = today or datetime.now(UTC).date()
     source = row.get("source", "memory")
     observed = session_date(row)
     if source in {"memory", "artifact"}:
@@ -91,34 +91,45 @@ def tier_prior(row, today=None):
 
 
 def metadata_adjustment(row, today=None):
-    """Optional, bounded date bonus and OCR penalty; missing metadata is neutral."""
+    """Rank-offset bonus centred at one-year age and OCR quality 0.9.
+
+    Each field changes at most half a rank; invalid/future dates are neutral.
+    Positive values are bonuses (subtracted from the tier offset).
+    """
     adjustment = 0.0
+    today = today or datetime.now(UTC).date()
     if row.get("source") == "document":
         observed = document_date(row)
-        if observed:
-            age = max(0, ((today or date.today()) - observed).days)
-            adjustment += 0.25 / (1 + age / 365)
+        if observed and date(1900, 1, 1) <= observed <= today:
+            age = (today - observed).days
+            adjustment += 1 / (1 + age / 365) - 0.5
         quality = _metadata(row, "ocr_quality")
         if (
             isinstance(quality, (int, float))
             and not isinstance(quality, bool)
             and math.isfinite(quality)
+            and 0 <= quality <= 1
         ):
-            adjustment -= 0.25 * (1 - max(0.0, min(1.0, quality)))
+            adjustment += max(-0.5, min(0.5, (quality - 0.9) * 5))
     return adjustment
 
 
+def _text(row):
+    return " ".join(str(row.get("text", "")).casefold().split())
+
+
 def _identities(row):
-    text = " ".join(str(row.get("text", "")).casefold().split())
+    text = _text(row)
     content_hash = _metadata(row, "content_hash")
     keys: list[tuple] = []
     if content_hash:
         keys.append(("hash", str(content_hash)))
-    if text:
+    # Identical boilerplate in distinct documents is not a duplicate document.
+    if len(text) >= 80 and row.get("source") in {"session", "archive"}:
         keys.append(("text", hashlib.sha256(text.encode()).hexdigest()))
     path, _ = canonical_path(row.get("path"))
-    if path and (row.get("heading") is not None or row.get("line") is not None):
-        # Never collapse different chunks of the same document solely by path.
+    if path and text and (row.get("heading") is not None or row.get("line") is not None):
+        # Copy-like filenames alone are insufficient: require equal text too.
         keys.append(
             (
                 "path",
@@ -126,6 +137,7 @@ def _identities(row):
                 path,
                 str(row.get("heading", "")).casefold(),
                 str(row.get("line", "")),
+                text,
             )
         )
     return keys
@@ -137,6 +149,7 @@ def fuse_scopes(lanes, today=None):
     Duplicate ranks use max, not sum: copies are not independent evidence.
     Distinct scope evidence for one canonical result contributes once per scope.
     """
+    today = today or datetime.now(UTC).date()
     groups: list[list[tuple[str, int, dict[str, Any]]]] = []
     index: dict[tuple, int] = {}
     for scope, rows in lanes:
@@ -171,19 +184,30 @@ def fuse_scopes(lanes, today=None):
             ),
         )
         item = {**canonical}
+        for field in ("lexical_evidence", "semantic_similarity", "relevance_score"):
+            if any(field in row for _, _, row in group):
+                item[field] = max(row.get(field, 0) for _, _, row in group)
+        item["exact_match"] = any(row.get("exact_match", False) for _, _, row in group)
         per_scope: dict[str, int] = {}
         for scope, rank, _ in group:
             per_scope[scope] = min(rank, per_scope.get(scope, rank))
-        base = sum(reciprocal_rank(rank) for rank in per_scope.values())
+        base = sum(reciprocal_rank(per_scope[scope]) for scope in sorted(per_scope))
         copy_penalty = (
-            1.0 if canonical_path(item.get("path"))[1] or item.get("canonical_of") else 0.0
+            3.0 if canonical_path(item.get("path"))[1] or item.get("canonical_of") else 0.0
         )
-        prior = tier_prior(item, today) + metadata_adjustment(item, today) - copy_penalty
-        item["score"] = base + prior / RRF_K
+        # T0/T1/T2/documents: offsets 0/1/2/4. A rank-1 document
+        # beats rank-6 memory; rank-3 memory beats rank-1 document.
+        offset = {4.0: 0, 3.0: 1, 2.0: 2, 1.0: 4}[tier_prior(item, today)]
+        adjusted = offset - metadata_adjustment(item, today) + copy_penalty
+        item["score"] = sum(
+            reciprocal_rank(per_scope[scope] + adjusted) for scope in sorted(per_scope)
+        )
         item["fusion_debug"] = {
             "scope_ranks": per_scope,
             "rrf_score": base,
             "tier_prior": tier_prior(item, today),
+            "rank_offset": adjusted,
+            "engine_ranks": [row.get("engine_ranks", {}) for _, _, row in group],
             "metadata_adjustment": metadata_adjustment(item, today),
             "copy_penalty": copy_penalty,
             "duplicates_collapsed": len(group) - 1,
@@ -200,7 +224,15 @@ def fuse_scopes(lanes, today=None):
                     alternatives.append(provenance)
         item["alternate_provenance"] = alternatives
         results.append(item)
-    results.sort(key=lambda item: (-item["score"], str(item.get("id", ""))))
+    results.sort(
+        key=lambda item: (
+            -item["score"],
+            -tier_prior(item, today),
+            min(item["fusion_debug"]["scope_ranks"].values()),
+            str(item.get("path", "")),
+            str(item.get("id", "")),
+        )
+    )
     for rank, item in enumerate(results, 1):
         item["fusion_debug"]["post_fusion_rank"] = rank
     return results

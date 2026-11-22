@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -275,9 +276,13 @@ class ApiTests(unittest.TestCase):
                 all("lexical_score" in row and "semantic_score" in row for row in results)
             )
             artifact = next(row for row in results if row["source"] == "artifact")
-            self.assertEqual(artifact["score"], 0.5)
-            self.assertEqual(artifact["lexical_score"], 0.1)
-            self.assertEqual(artifact["semantic_score"], 0.4)
+            if os.getenv("UNIFIED_FUSION_MODE", "legacy") == "legacy":
+                self.assertEqual(artifact["score"], 0.5)
+                self.assertEqual(artifact["lexical_score"], 0.1)
+                self.assertEqual(artifact["semantic_score"], 0.4)
+            else:
+                self.assertAlmostEqual(artifact["score"], 1 / 61)
+                self.assertEqual(results[0]["source"], "artifact")
         finally:
             server.hybrid_search = original_hybrid
             server.archive_store = original_archive
@@ -328,7 +333,7 @@ class ApiTests(unittest.TestCase):
                         "id": path,
                         "path": path,
                         "heading": "Decision",
-                        "text": "  Keep   the approved architecture. ",
+                        "text": "  Keep   the approved architecture and preserve the original long conversation as evidence for decisions. ",
                         "line": 4,
                         "score": 0.3,
                         "lexical_score": 0.1,
@@ -344,7 +349,12 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(warnings, ["documents: not configured"])
             self.assertEqual(len(results), 1)
             self.assertEqual(len(results[0]["alternate_provenance"]), 1)
-            self.assertEqual(results[0]["score"], 0.3)
+            if os.getenv("UNIFIED_FUSION_MODE", "legacy") == "legacy":
+                self.assertEqual(results[0]["score"], 0.3)
+            else:
+                self.assertGreater(results[0]["score"], 0)
+                self.assertEqual(results[0]["semantic_similarity"], 0.8)
+                self.assertEqual(results[0]["lexical_evidence"], 2.0)
         finally:
             server.hybrid_search = original_hybrid
             server.archive_store = original_archive

@@ -100,28 +100,41 @@ class RankFusionTests(unittest.TestCase):
         self.assertTrue(canonical_path("startup-memory-trim-2026-01-01.md")[1])
 
     def test_dedup_keeps_canonical_despite_worse_rank_and_merges_provenance(self):
-        copy = hit("notes/topic-copy", text="older wording", provenance={"path": "copy"})
-        canonical = hit("notes/topic", text="current wording", provenance={"path": "canonical"})
+        copy = hit("notes/topic-copy", text="shared wording", provenance={"path": "copy"})
+        canonical = hit("notes/topic", text="shared wording", provenance={"path": "canonical"})
         results = fuse_scopes([("main", [copy, canonical])])
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["id"], "notes/topic")
-        self.assertEqual(results[0]["text"], "current wording")
+        self.assertEqual(results[0]["text"], "shared wording")
         self.assertEqual(results[0]["alternate_provenance"], [{"path": "copy"}])
         self.assertEqual(results[0]["fusion_debug"]["duplicates_collapsed"], 1)
         self.assertEqual(results[0]["fusion_debug"]["rrf_score"], 1 / 61)
 
-    def test_text_and_hash_duplicates_and_transitive_groups(self):
-        a = hit("a", content_hash="digest", text="Shared Text")
+    def test_hash_duplicates_and_session_text_minimum(self):
+        a = hit("a", content_hash="digest")
         b = hit("b", content_hash="digest", text="different")
-        c = hit("c", text="  shared   text ")
-        results = fuse_scopes([("main", [a, b, c])])
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["fusion_debug"]["duplicates_collapsed"], 2)
-        # Bridge two previously distinct groups.
-        results = fuse_scopes(
-            [("main", [hit("a", text="one"), hit("b", text="two"), hit("a", text="two")])]
-        )
-        self.assertEqual(len(results), 1)
+        self.assertEqual(len(fuse_scopes([("main", [a, b])])), 1)
+        text = "A long transcript sentence that establishes evidence of shared conversation. " * 2
+        a, b = hit("a", "session", text=text), hit("b", "archive", text=text.upper())
+        self.assertEqual(len(fuse_scopes([("main", [a]), ("archive", [b])])), 1)
+        a["text"] = b["text"] = "okay"
+        self.assertEqual(len(fuse_scopes([("main", [a]), ("archive", [b])])), 2)
+
+    def test_transitive_groups_require_explicit_identity_bridges(self):
+        a = hit("a", text="shared", content_hash="chunk-digest")
+        b = hit("b", text="shared")
+        bridge = hit("bridge", path="b.md", text="shared", content_hash="chunk-digest")
+        rows = fuse_scopes([("main", [a, b, bridge])])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["fusion_debug"]["duplicates_collapsed"], 2)
+        # An unrelated same-text document must not enter the component.
+        other = hit("other", "document", text="shared")
+        self.assertEqual(len(fuse_scopes([("main", [a, b, bridge]), ("documents", [other])])), 2)
+
+    def test_unknown_confidence_metadata_stays_unknown(self):
+        rows = fuse_scopes([("main", [hit("a")])])
+        self.assertNotIn("semantic_similarity", rows[0])
+        self.assertFalse(server.is_low_confidence(rows))
 
     def test_distinct_document_chunks_are_not_collapsed(self):
         results = fuse_scopes(
@@ -147,7 +160,7 @@ class RankFusionTests(unittest.TestCase):
         normal = hit("canonical")
         results = fuse_scopes([("main", [copy, normal])])
         self.assertEqual(results[0]["id"], "canonical")
-        self.assertEqual(results[1]["fusion_debug"]["copy_penalty"], 1)
+        self.assertEqual(results[1]["fusion_debug"]["copy_penalty"], 3)
 
     def test_optional_metadata_neutral_and_malformed_defaults(self):
         row = hit("doc", "document")
@@ -156,9 +169,9 @@ class RankFusionTests(unittest.TestCase):
             self.assertIsNone(document_date({**row, "doc_date": value}))
         for quality in (None, "low", float("nan"), float("inf"), True):
             self.assertEqual(metadata_adjustment({**row, "ocr_quality": quality}), 0)
-        self.assertEqual(metadata_adjustment({**row, "metadata": {"ocr_quality": 0}}), -0.25)
-        self.assertEqual(metadata_adjustment({**row, "ocr_quality": 1}), 0)
-        self.assertEqual(metadata_adjustment({**row, "doc_date": "2099-01-01"}), 0.25)
+        self.assertEqual(metadata_adjustment({**row, "metadata": {"ocr_quality": 0}}), -0.5)
+        self.assertAlmostEqual(metadata_adjustment({**row, "ocr_quality": 1}), 0.5)
+        self.assertEqual(metadata_adjustment({**row, "doc_date": "2099-01-01"}), 0)
         self.assertEqual(metadata_adjustment(hit("main", ocr_quality=0)), 0)
 
     def test_identifier_query_runs_lexical_exact_and_vector_in_rrf_mode(self):
@@ -167,7 +180,7 @@ class RankFusionTests(unittest.TestCase):
         selected.search_exact.return_value = []
         selected.search_fuzzy.return_value = []
         vector = Mock()
-        vector.search.return_value = [hit(point_id("semantic"), score=0.99)]
+        vector.search.return_value = [hit(point_id("semantic"), path="semantic.md", score=0.99)]
         with (
             patch.dict(os.environ, {"UNIFIED_FUSION_MODE": "rrf"}),
             patch.object(server, "store", selected),
@@ -190,7 +203,7 @@ class RankFusionTests(unittest.TestCase):
         vector = Mock()
         vector.search.return_value = [
             hit(point_id("joint"), score=0.01),
-            hit(point_id("semantic"), score=0.99),
+            hit(point_id("semantic"), path="semantic.md", score=0.99),
         ]
         with (
             patch.object(server._search_state, "rank_fusion", True, create=True),
@@ -224,7 +237,7 @@ class RankFusionTests(unittest.TestCase):
         self.assertNotIn("private_synthetic_token", "\n".join(logs.output))
         self.assertFalse(getattr(server._search_state, "rank_fusion", False))
 
-    def test_nimble_one_call_cannot_override_final_tier_prior(self):
+    def test_nimble_one_call_applies_soft_final_prior(self):
         main, documents = object(), object()
 
         def hybrid(query, limit, selected, vector):
@@ -266,6 +279,120 @@ class RankFusionTests(unittest.TestCase):
             results, _ = server.unified_search("unseen", 5, "main")
         self.assertTrue(server.is_low_confidence(results))
         self.assertGreater(results[0]["score"], 0)
+
+    def test_soft_prior_interleaves_documents_and_memory(self):
+        memory = [hit(f"m{i}") for i in range(1, 13)]
+        rows = fuse_scopes([("main", memory), ("documents", [hit("d", "document")])])
+        ids = [r["id"] for r in rows]
+        self.assertLess(ids.index("m3"), ids.index("d"))
+        self.assertLess(ids.index("d"), ids.index("m6"))
+        self.assertLess(ids.index("d"), ids.index("m10"))
+
+    def test_duplicates_merge_best_evidence_and_do_not_merge_distinct_documents(self):
+        a = hit(
+            "a",
+            text="same",
+            lexical_evidence=0,
+            semantic_similarity=0.1,
+            relevance_score=0.1,
+            exact_match=False,
+        )
+        b = hit(
+            "a-copy",
+            text="same",
+            lexical_evidence=8,
+            semantic_similarity=0.9,
+            relevance_score=0.9,
+            exact_match=True,
+        )
+        row = fuse_scopes([("main", [b, a])])[0]
+        self.assertEqual(row["path"], "a.md")
+        self.assertEqual(row["lexical_evidence"], 8)
+        self.assertEqual(row["semantic_similarity"], 0.9)
+        self.assertEqual(row["relevance_score"], 0.9)
+        self.assertTrue(row["exact_match"])
+        self.assertFalse(server.is_low_confidence([row]))
+        self.assertEqual(len(server.apply_search_profile([row], 1, "prompt")), 1)
+        documents = [
+            hit("invoice-a", "document", text="identical boilerplate"),
+            hit("invoice-b", "document", text="identical boilerplate"),
+            hit("q3", "document", text="first version"),
+            hit("q3-trim", "document", text="different version"),
+        ]
+        self.assertEqual(len(fuse_scopes([("documents", documents)])), 4)
+
+    def test_metadata_neutral_baselines_and_bounded_effect(self):
+        today = date(2026, 11, 22)
+        row = hit("doc", "document")
+        self.assertEqual(metadata_adjustment({**row, "ocr_quality": 0.9}), 0)
+        self.assertEqual(metadata_adjustment({**row, "doc_date": "2025-11-22"}, today), 0)
+        self.assertEqual(metadata_adjustment({**row, "doc_date": "1899-01-01"}, today), 0)
+        self.assertEqual(metadata_adjustment({**row, "ocr_quality": -1}), 0)
+        self.assertEqual(metadata_adjustment({**row, "ocr_quality": 2}), 0)
+
+    def test_deterministic_equal_scores(self):
+        a, b = hit("a"), hit("b")
+        # Same rank in independent lanes: path tie-break is stable.
+        for lanes in [[("x", [a]), ("y", [b])], [("y", [b]), ("x", [a])]] * 3:
+            self.assertEqual([r["id"] for r in fuse_scopes(lanes)], ["a", "b"])
+
+    def test_library_debug_is_opt_in(self):
+        selected = Mock(spec=["search"])
+        selected.search.return_value = [hit("a", score=1)]
+        with (
+            patch.dict(os.environ, {"UNIFIED_FUSION_MODE": "rrf"}),
+            patch.object(server, "store", selected),
+            patch.object(server, "vector_store", None),
+        ):
+            rows, _ = server.unified_search("unseen", 1, "main")
+            self.assertNotIn("fusion_debug", rows[0])
+            rows, *_ = server.unified_search_with_coverage("unseen", 1, "main", debug=True)
+            self.assertEqual(rows[0]["fusion_debug"]["post_profile_rank"], 1)
+            self.assertEqual(rows[0]["fusion_debug"]["engine_ranks"], [{"lexical": 1}])
+
+    def test_nimble_receives_canonical_candidates_only(self):
+        rows = [hit("a-copy", text="shared"), hit("a", text="shared"), hit("b")]
+        with (
+            patch.dict(os.environ, {"UNIFIED_FUSION_MODE": "rrf"}),
+            patch.object(server, "hybrid_search", return_value=rows),
+            patch.object(server, "nimble_rerank", side_effect=lambda q, rows: rows) as nimble,
+        ):
+            server.unified_search("topic", 10, "main")
+        self.assertEqual([r["path"] for r in nimble.call_args.args[1]], ["a.md", "b.md"])
+
+    def test_http_confidence_before_truncation_and_invalid_mode(self):
+        main, documents = object(), object()
+
+        def hybrid(query, limit, selected, vector):
+            if selected is main:
+                return [hit("weak", semantic_similarity=0.1, lexical_evidence=0)]
+            return [hit("strong", "document", semantic_similarity=0.1, lexical_evidence=2)]
+
+        http = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        Thread(target=http.serve_forever, daemon=True).start()
+        try:
+            with (
+                patch.object(server, "store", main),
+                patch.object(server, "documents_store", documents),
+                patch.object(server, "archive_store", None),
+                patch.object(server, "hybrid_search", side_effect=hybrid),
+            ):
+                for mode in ("rrf", "legacy", "mistyped"):
+                    with patch.dict(os.environ, {"UNIFIED_FUSION_MODE": mode}):
+                        connection = HTTPConnection(*http.server_address)
+                        connection.request("GET", "/unified/search?q=topic&limit=1&debug=1")
+                        response = connection.getresponse()
+                        payload = json.loads(response.read())
+                        connection.close()
+                    self.assertEqual(response.status, 500 if mode == "mistyped" else 200)
+                    if mode != "mistyped":
+                        self.assertNotIn("low_confidence", payload)
+                        self.assertEqual(payload["fusion"], mode)
+                        if mode == "legacy":
+                            self.assertNotIn("fusion_debug", payload["results"][0])
+        finally:
+            http.shutdown()
+            http.server_close()
 
     def test_invalid_config_fails_explicitly(self):
         with patch.dict(os.environ, {"UNIFIED_FUSION_MODE": "mistyped"}):

@@ -36,7 +36,7 @@ For a tiered memory layout, including a separate historical session archive and 
 | `ARCHIVE_ROOT` | unset | Enables the archive API; separate SQLite/Qdrant collections |
 | `ARCHIVE_SQLITE_PATH` | `archive.db` | SQLite database for the archive index |
 | `ARCHIVE_QDRANT_COLLECTION` | `memory-archive` | Qdrant collection for the archive index |
-| `UNIFIED_FUSION_MODE` | `legacy` | `rrf` enables rank-only within/across-scope fusion, tier prior, metadata adjustments and canonical dedup; see [Rank fusion](docs/RANK_FUSION.md). Legacy remains default while score-contract compatibility is retained |
+| `UNIFIED_FUSION_MODE` | `legacy` | `rrf` enables rank-only within/across-scope fusion, tier prior, metadata adjustments and canonical dedup; see [Rank fusion](docs/RANK_FUSION.md). Legacy remains default pending owner-labelled evaluation and consumer audit; tier rank offsets are 0/1/2/4 |
 | `PROMPT_MIN_RELEVANCE` | `0.2` | Minimum normalized evidence score for `profile=prompt` |
 | `PROMPT_MEMORY_QUOTA` | `3` | Maximum memory results in the prompt profile |
 | `PROMPT_ARTIFACT_QUOTA` | `1` | Maximum artifact results in the prompt profile |
@@ -76,8 +76,8 @@ The built-in embedding is a deterministic feature-hash baseline. It makes the se
 
 ## API
 
-Unified search supports an opt-in [rank fusion mode](docs/RANK_FUSION.md). Add
-`debug=1` to return numeric pre/post-fusion ranks in each result's `fusion_debug`
+Unified responses include `fusion: "legacy"|"rrf"`; `score` is an opaque ordering key and is not comparable across modes. Low confidence is computed before profile quotas and result truncation. Unified search supports an opt-in [rank fusion mode](docs/RANK_FUSION.md). Add
+`debug=1` to return numeric engine, candidate-legacy, pre/post-fusion and post-profile ranks in each result's `fusion_debug`
 field in that mode. Queries and candidate text are not logged by this path.
 
 - `POST /index` scans and incrementally indexes Markdown files; response includes added, changed, removed, and unchanged counts.
@@ -103,7 +103,7 @@ field in that mode. Queries and candidate text are not logged by this path.
   also adds `<source>: not configured`, so clients that ignore `coverage`
   still see the gap. Clients that ignore unknown fields are unaffected.
 - `/unified/search` adds `low_confidence: true` and a `confidence_note` when no result has lexical or exact evidence and every semantic similarity is below `LOW_CONFIDENCE_SEMANTIC_FLOOR` (default 0.6), i.e. the query probably has no relevant match. Results are still returned. Queries whose terms all appear in a chunk (two or more terms) get `FULL_COVERAGE_BOOST` (default 1.0) so multi-identifier lexical matches rank above semantic-only hits.
-- When `NIMBLE_RERANK_URL` is configured, `/unified/search` may reorder only the bounded non-exact candidates using the `nimble:9b` `/v1/systemone` relevance choice. Exact matches retain their baseline order and precedence. Any timeout, transport/HTTP error, or invalid Nimble response discards partial scores and returns the untouched baseline results; coverage, provenance, scores, and confidence fields are not recalculated. This option does not alter the confidence floor. Keep it unset to disable reranking.
+- In legacy mode, when `NIMBLE_RERANK_URL` is configured, `/unified/search` may reorder only the bounded non-exact candidates using the `nimble:9b` `/v1/systemone` relevance choice. Exact matches retain their baseline order and precedence. Any timeout, transport/HTTP error, or invalid Nimble response discards partial scores and returns the untouched baseline results; coverage, provenance, scores, and confidence fields are not recalculated. This option does not alter the confidence floor. Keep it unset to disable reranking. In RRF mode, canonical groups are selected before Nimble and its within-scope order is then fused using the soft rank offsets; final `score` values are recalculated (see the rank-fusion documentation).
 - `profile=tool` preserves the broad, backward-compatible result set.
   `profile=prompt` applies normalized evidence thresholds and per-source quotas
   so automatic recall cannot be dominated by one corpus. Thresholds apply to
