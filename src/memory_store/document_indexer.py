@@ -10,6 +10,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .chunker import chunk_markdown
+from .doc_metadata import (
+    DEFAULT_FRONTMATTER_DATE_KEYS,
+    METADATA_VERSION,
+    context_header,
+    extract_document_metadata,
+    ocr_quality,
+)
 
 logger = logging.getLogger("memory_store.documents")
 
@@ -51,8 +58,15 @@ class DocumentIndexer:
         include_patterns=("**/*.md",),
         exclude_patterns=(),
         read_only=False,
+        context_header=False,
+        frontmatter_date_keys=DEFAULT_FRONTMATTER_DATE_KEYS,
     ):
-        """``read_only`` skips schema creation so status/errors perform no DDL or writes."""
+        """``read_only`` skips schema creation so status/errors perform no DDL or writes.
+
+        ``context_header`` (default off) prepends ``title | date | category`` to the text
+        that is embedded and full-text indexed; stored chunk text and chunk ids are never
+        changed by it, so enabling it only changes ranking inputs after a re-index.
+        """
         self.root = Path(root)
         self.store = store
         self.vector_store = vector_store
@@ -65,6 +79,8 @@ class DocumentIndexer:
             db_path = store.db.execute("PRAGMA database_list").fetchone()[2]
         self.lock_path = db_path + ".lock" if db_path else str(self.root / ".documents.lock")
         self.read_only = read_only
+        self.context_header = bool(context_header)
+        self.frontmatter_date_keys = tuple(frontmatter_date_keys)
         if not read_only:
             self._init_state()
 
@@ -82,6 +98,25 @@ class DocumentIndexer:
               last_success_at TEXT
             )
             """)
+            self.store.db.execute(
+                "CREATE TABLE IF NOT EXISTS document_index_profile("
+                "path TEXT PRIMARY KEY, profile TEXT NOT NULL)"
+            )
+            self.store.db.commit()
+
+    @property
+    def profile(self):
+        """Identifies how files are indexed; a ``reindex`` run redoes files with another one."""
+        return f"meta{METADATA_VERSION}|header={int(self.context_header)}"
+
+    def _profiles(self):
+        return dict(self.store.db.execute("SELECT path, profile FROM document_index_profile"))
+
+    def _record_profile(self, path):
+        with self.store.write_lock:
+            self.store.db.execute(
+                "INSERT OR REPLACE INTO document_index_profile VALUES (?,?)", (path, self.profile)
+            )
             self.store.db.commit()
 
     def _state(
@@ -138,7 +173,12 @@ class DocumentIndexer:
             }
         )
 
-    def scan(self, max_files=250):
+    def scan(self, max_files=250, reindex=False):
+        """Index new/changed files; ``reindex`` also redoes files indexed under another profile.
+
+        Without ``reindex`` the behaviour is unchanged: files whose content digest is
+        unchanged are skipped, so deploying a newer version never forces a re-index.
+        """
         if not 1 <= max_files <= 10000:
             raise ValueError("max_files must be between 1 and 10000")
         with open(self.lock_path, "w") as lock:
@@ -151,7 +191,7 @@ class DocumentIndexer:
                 error = f"documents root does not exist: {self.root}"
                 self.store.set_index_metadata("last_index_error", error)
                 raise FileNotFoundError(error)
-            result = self._scan(max_files)
+            result = self._scan(max_files, reindex)
         self.store.set_index_metadata("last_index_completed_at", datetime.now(UTC).isoformat())
         self.store.set_index_metadata(
             "last_index_error", "" if not result.errors else f"{result.errors} file errors"
@@ -170,10 +210,11 @@ class DocumentIndexer:
                     raise IndexBusyError("document index already running") from None
                 time.sleep(0.05)
 
-    def _scan(self, max_files):
+    def _scan(self, max_files, reindex=False):
         stats = DocumentScanStats()
         discovered = {}
         failures = {}
+        profiles = self._profiles() if reindex else {}
         for path in self._paths():
             rel = path.relative_to(self.root).as_posix()
             try:
@@ -184,6 +225,7 @@ class DocumentIndexer:
                     and previous[1] == current.st_size
                     and previous[2] == current.st_mtime_ns
                     and self.store.file_digest(rel) == previous[0]
+                    and (not reindex or profiles.get(rel) == self.profile)
                 ):
                     discovered[rel] = (None, previous[0], current)
                     continue
@@ -208,7 +250,9 @@ class DocumentIndexer:
         changes = [
             rel
             for rel, (_, digest, _) in discovered.items()
-            if rel in retry or self.store.file_digest(rel) != digest
+            if rel in retry
+            or self.store.file_digest(rel) != digest
+            or (reindex and profiles.get(rel) != self.profile)
         ]
         removals = sorted(existing - set(discovered) - set(failures))
         # Unreachable state rows: a path that is neither on disk (present in
@@ -246,6 +290,9 @@ class DocumentIndexer:
                         self.store.db.execute(
                             "DELETE FROM document_file_state WHERE path=?", (rel,)
                         )
+                        self.store.db.execute(
+                            "DELETE FROM document_index_profile WHERE path=?", (rel,)
+                        )
                         self.store.db.commit()
                     stats.removed += 1
                     continue
@@ -255,10 +302,21 @@ class DocumentIndexer:
                 old_digest = self.store.file_digest(rel)
                 old_ids = self.store.chunk_ids(rel)
                 chunks = []
+                chunk_metadata = {}
+                meta = extract_document_metadata(content, rel, self.frontmatter_date_keys)
+                header = context_header(meta) if self.context_header else ""
                 for number, chunk in enumerate(chunk_markdown(content, self.chunk_size)):
                     chunk_id = hashlib.sha256(f"{rel}\0{number}\0{chunk.text}".encode()).hexdigest()
-                    vector = self.embed(f"{chunk.heading} {chunk.text}")
+                    embed_text = f"{chunk.heading} {chunk.text}"
+                    vector = self.embed(f"{header}\n{embed_text}" if header else embed_text)
                     chunks.append((chunk_id, chunk.heading, chunk.text, chunk.start_line, vector))
+                    chunk_metadata[chunk_id] = {
+                        "doc_date": meta.doc_date,
+                        "category": meta.category,
+                        "ocr_quality": ocr_quality(chunk.text),
+                        "language": meta.language,
+                        "header": header,
+                    }
                 if self.vector_store:
                     records = [
                         (cid, rel, heading, body, line, vector)
@@ -266,7 +324,7 @@ class DocumentIndexer:
                     ]
                     self.vector_store.upsert_precomputed(records)
                 try:
-                    self.store.upsert_file_precomputed(rel, digest, chunks)
+                    self.store.upsert_file_precomputed(rel, digest, chunks, chunk_metadata)
                 except Exception:
                     if self.vector_store:
                         self.vector_store.delete_ids(
@@ -284,6 +342,7 @@ class DocumentIndexer:
                     status="ok",
                     success=True,
                 )
+                self._record_profile(rel)
                 if old_digest is None:
                     stats.added += 1
                 else:
