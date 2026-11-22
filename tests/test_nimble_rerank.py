@@ -214,7 +214,15 @@ class NimbleRerankTests(unittest.TestCase):
         )
         by_id = {r["path"][0]: r for r in baseline["results"]}
         for item in payload["results"]:
-            self.assertEqual(item, by_id[item["path"][0]])
+            original = by_id[item["path"][0]]
+            if os.getenv("UNIFIED_FUSION_MODE", "legacy") == "legacy":
+                self.assertEqual(item, original)
+            else:
+                self.assertEqual(
+                    {k: v for k, v in item.items() if k != "score"},
+                    {k: v for k, v in original.items() if k != "score"},
+                )
+                self.assertGreater(item["score"], 0)
         self.assertEqual(payload["coverage"], baseline["coverage"])
         self.assertEqual(payload.get("low_confidence"), baseline.get("low_confidence"))
 

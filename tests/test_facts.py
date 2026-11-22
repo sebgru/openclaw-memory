@@ -477,7 +477,11 @@ def test_flag_off_api_surface_unchanged(api, store):
                 "/unified/search?q=example&fact_subject=person:owner&fact_predicate=employment.employer",
                 token=None,
             )
-            assert status == 200 and data == {"results": [], "coverage": {}}
+            assert status == 200 and data == {
+                "results": [],
+                "coverage": {},
+                "fusion": "legacy",
+            }
     assert not Path(store.path).exists()
 
 
@@ -1141,7 +1145,7 @@ def test_review2_f1_encoded_keys_success_masks_both_search_and_access_logs(api, 
     ):
         status, body = api("GET", path)
     assert status == 200 and "current_state" in body
-    assert "[fact lookup]" in caplog.text and "path=/unified/search" in caplog.text
+    assert "private fact request path=/unified/search" in caplog.text
     for value in [
         "PRIVATE_LOG_MARKER",
         "PRIVATE_ITEM_MARKER",
@@ -1361,7 +1365,7 @@ def test_review2_f1_fact_marked_legacy_unified_query_also_redacts_application_lo
             "GET", "/unified/search?q=PRIVATE_LOG_MARKER&%66act_item_key=PRIVATE_ITEM_MARKER"
         )
     assert status == 200 and "current_state" not in body
-    assert "[fact lookup]" in caplog.text
+    assert "private fact request path=/unified/search" in caplog.text
     assert "PRIVATE_" not in caplog.text
 
 
@@ -1376,3 +1380,77 @@ def test_review2_f1_malformed_protocol_cannot_echo_private_raw_requestline(api, 
     assert b"Error response" in response
     assert "request rejected before route parsing" in caplog.text
     assert "PRIVATE_" not in caplog.text and "%66act_" not in caplog.text
+
+
+def test_derived_age_conflict_after_owner_current_skips_derived_value():
+    dob = claim(
+        1,
+        "owner_stated",
+        "1990-01-01",
+        predicate="identity.date_of_birth",
+        value_type="date",
+        privacy_class="identity",
+    )
+    newer = claim(
+        2,
+        "document",
+        "1991-01-01",
+        date="2026-11-01",
+        predicate="identity.date_of_birth",
+        value_type="date",
+        privacy_class="identity",
+    )
+    r = resolve([dob, newer], "person:owner", "person.age", as_of=STAMP)
+    assert r["state"] == "conflict" and "derived_value" not in r
+    assert r["derived_from"] == [dob["fact_id"]]
+
+
+def test_ingest_candidate_without_evidence_date_is_accepted(store):
+    store.ingest_candidate(claim(date=None))
+    r = store.read("person:owner", "employment.employer")
+    assert r["state"] == "resolved"
+    assert "unknown_source_date" in r["disclosures"]
+
+
+def test_retracting_one_of_three_conflicts_keeps_the_remaining_conflict(store):
+    confirmed(store)
+    confirmed(store, value="Second Synthetic Org")
+    third = confirmed(store, value="Third Synthetic Org")
+    d = store.draft(
+        draft(action="retract", value=third["value"], target_fact_ids=[third["fact_id"]])
+    )
+    store.confirm(d["draft_id"], CONFIRM)
+    assert store.read("person:owner", "employment.employer")["state"] == "conflict"
+
+
+def test_startup_fact_path_validation_in_process(tmp_path):
+    import importlib
+    import os
+
+    base = {
+        "MEMORY_FACTS_ENABLED": "true",
+        "MEMORY_FACTS_WRITE_TOKEN": "synthetic-only",
+        "SQLITE_PATH": str(tmp_path / "index.db"),
+        "MEMORY_FACTS_SQLITE_PATH": str(tmp_path / "facts.db"),
+    }
+    original = {key: os.environ.get(key) for key in base}
+    try:
+        for path, message in [
+            ("relative.db", "must be absolute"),
+            (str(tmp_path / "index.db"), "must be separate"),
+        ]:
+            with patch.dict(os.environ, {**base, "MEMORY_FACTS_SQLITE_PATH": path}):
+                with pytest.raises(ValueError, match=message):
+                    importlib.reload(server)
+        with patch.dict(os.environ, {**base, "MEMORY_FACTS_WRITE_TOKEN": ""}):
+            with patch.object(server.logger, "warning") as warning:
+                reloaded = importlib.reload(server)
+            warning.assert_called_once()
+            assert reloaded.FACTS_ENABLED and reloaded.FACTS_TOKEN == ""
+    finally:
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        importlib.reload(server)

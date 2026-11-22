@@ -1,4 +1,6 @@
 import json
+import os
+import socket
 import sys
 import unittest
 from pathlib import Path
@@ -37,6 +39,28 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.request("/search"), 400)
         self.assertEqual(self.request("/search?q=x&limit=no"), 400)
         self.assertEqual(self.request("/status"), 200)
+
+    def test_malformed_requests_return_errors_without_logging_query(self):
+        cases = (
+            (b"GET /unified/search?q=SECRETQUERY HTTP/9.9 extra junk", 400),
+            (b"GET /unified/search?q=SECRETQUERY HTTP/invalid", 400),
+            (b"/unified/search?q=SECRETQUERY", 400),
+            (b"GET /unified/search?q=SECRETQUERY" + b"x" * 65536, 414),
+        )
+        for line, status in cases:
+            with self.subTest(status=status, length=len(line)):
+                with (
+                    self.assertLogs("memory_store", level="INFO") as logs,
+                    socket.create_connection(self.http.server_address, timeout=5) as connection,
+                ):
+                    connection.sendall(line + b"\r\n\r\n")
+                    response = b""
+                    while chunk := connection.recv(65536):
+                        response += chunk
+                # HTTP/0.9 malformed lines receive an HTML error without headers.
+                self.assertIn(f"Error code: {status}".encode(), response)
+                self.assertNotIn("SECRETQUERY", "\n".join(logs.output))
+                self.assertIn("http request rejected", "\n".join(logs.output))
 
     def test_search_exposes_separate_hybrid_scores(self):
         original = server.store.search
@@ -275,9 +299,13 @@ class ApiTests(unittest.TestCase):
                 all("lexical_score" in row and "semantic_score" in row for row in results)
             )
             artifact = next(row for row in results if row["source"] == "artifact")
-            self.assertEqual(artifact["score"], 0.5)
-            self.assertEqual(artifact["lexical_score"], 0.1)
-            self.assertEqual(artifact["semantic_score"], 0.4)
+            if os.getenv("UNIFIED_FUSION_MODE", "legacy") == "legacy":
+                self.assertEqual(artifact["score"], 0.5)
+                self.assertEqual(artifact["lexical_score"], 0.1)
+                self.assertEqual(artifact["semantic_score"], 0.4)
+            else:
+                self.assertAlmostEqual(artifact["score"], 1 / 61)
+                self.assertEqual(results[0]["source"], "artifact")
         finally:
             server.hybrid_search = original_hybrid
             server.archive_store = original_archive
@@ -328,7 +356,7 @@ class ApiTests(unittest.TestCase):
                         "id": path,
                         "path": path,
                         "heading": "Decision",
-                        "text": "  Keep   the approved architecture. ",
+                        "text": "  Keep   the approved architecture and preserve the original long conversation as evidence for decisions. ",
                         "line": 4,
                         "score": 0.3,
                         "lexical_score": 0.1,
@@ -344,7 +372,12 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(warnings, ["documents: not configured"])
             self.assertEqual(len(results), 1)
             self.assertEqual(len(results[0]["alternate_provenance"]), 1)
-            self.assertEqual(results[0]["score"], 0.3)
+            if os.getenv("UNIFIED_FUSION_MODE", "legacy") == "legacy":
+                self.assertEqual(results[0]["score"], 0.3)
+            else:
+                self.assertGreater(results[0]["score"], 0)
+                self.assertEqual(results[0]["semantic_similarity"], 0.8)
+                self.assertEqual(results[0]["lexical_evidence"], 2.0)
         finally:
             server.hybrid_search = original_hybrid
             server.archive_store = original_archive
