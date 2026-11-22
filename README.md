@@ -53,6 +53,8 @@ For a tiered memory layout, including a separate historical session archive and 
 | `DOCUMENTS_QDRANT_COLLECTION` | `documents` | Separate document vector collection |
 | `DOCUMENTS_INCLUDE_PATTERNS` | `**/*.md` | Comma-separated document globs |
 | `DOCUMENTS_EXCLUDE_PATTERNS` | empty | Comma-separated document exclusions |
+| `DOCUMENTS_CONTEXT_HEADER` | `false` | When truthy (`1`, `true`, `yes`, `on`), prepends a short `title \| date \| category` header to chunk text for embedding and FTS of newly (re)indexed documents. Off by default |
+| `DOCUMENTS_DATE_FRONTMATTER_KEYS` | `document_date,doc_date,date,datum` | Comma-separated frontmatter keys consulted, in order, for the verified document date |
 | `PROMPT_DOCUMENT_QUOTA` | `2` | Maximum document results in the prompt profile |
 | `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` also logs unchanged files) |
 | `PORT` | `8080` | HTTP port the server listens on |
@@ -248,6 +250,72 @@ shared with the main or archive indexes. Repeated bounded calls to
 `POST /documents/index` complete the initial backfill; subsequent calls skip
 unchanged files using stored size, nanosecond mtime, and SHA-256 metadata.
 
+## Document metadata for ranking
+
+Each chunk in the documents scope carries four deterministic metadata fields
+(no LLM, no network). They are stored in the document database and returned
+by `/documents/search` and `/unified/search` (scope `documents`) next to the
+usual result fields; chunks indexed before the migration omit them.
+
+| Field | Values | Source |
+| --- | --- | --- |
+| `doc_date` | `YYYY-MM-DD` or `null` | Frontmatter date key, a labelled date in the content (for example `Datum:`, `Invoice date:`, `Rechnungsdatum:`), or a date pattern in the file name. Never file mtime or conversion time; birth and due dates are ignored |
+| `category` | `family`, `home`, `finance`, `insurance`, `vehicle`, `health`, `work`, `other` | Path segments first, then keywords (German and English); content keywords need at least two hits; ties resolve by fixed precedence (see below) |
+| `ocr_quality` | `0.0`-`1.0` or `null` | Share of plausible words and clean characters; low for symbol noise and digit/letter confusions. Fairly clean text scores above 0.9 |
+| `language` | `de`, `en`, `ru`, `other` | Stop-word and script detection |
+
+Limitations: `ocr_quality` cannot detect subtle letter substitutions that still
+produce word-like tokens; `category` is a keyword heuristic and falls back to
+`other` when nothing matches. When several categories score equally, the
+first in this fixed precedence wins: insurance, vehicle, health, finance, work,
+home, family (for example `versicherung-kfz.md` is `insurance`). Dates are only
+taken when explicitly labelled; labels such as birth, due, valid-until or
+created/modified are skipped, and uncertain cases stay `null`.
+
+### Migration
+
+Opening an existing `documents.db` adds the four columns
+(`ALTER TABLE ... ADD COLUMN`) and an index on `chunks(path)`. No rows are
+rewritten or removed; legacy chunks keep `NULL` metadata until their file is
+re-indexed. The step is idempotent. The main and archive databases are not
+touched. Rolling back to an image without this change requires restoring the
+pre-migration `documents.db` copy, because the old image inserts with a
+positional column list.
+
+### Metadata header (off by default)
+
+With `DOCUMENTS_CONTEXT_HEADER` unset or false, chunk text sent to the
+embedder, the FTS columns, the vector payload and the chunk ids are exactly
+what they were before this feature; deploying the image changes no ranking and
+does not trigger a re-index. When enabled, the header is added to the embedding
+input and the FTS heading column of files that are subsequently indexed;
+stored heading, body and chunk ids are unchanged.
+
+### Re-index command
+
+Normal scans skip unchanged files. After changing `DOCUMENTS_CONTEXT_HEADER`
+or `DOCUMENTS_DATE_FRONTMATTER_KEYS` (both are part of the recorded index profile),
+or to backfill metadata for existing chunks, run the bounded, resumable
+re-index; each call processes up to `max_files` files whose recorded index
+profile differs from the current one:
+
+```bash
+curl -s -X POST http://localhost:8080/documents/index \
+  -H 'Content-Type: application/json' \
+  -d '{"reindex": true, "max_files": 100}'
+# repeat until the response reports "pending": 0
+```
+
+`reindex` must be a JSON boolean. Do not run this against a live deployment
+without approval.
+
+### Operational approvals
+
+Enabling the flag (configuration), restarting the service, building or
+rebuilding an index, and pushing, opening or merging a pull request each
+require explicit owner approval (C5). Nothing in this feature performs them
+automatically.
+
 ## CI/CD
 
 - **CI** (`ci.yml`): Ruff lint and format check, mypy type check, pytest with coverage (≥ 99%), Codecov upload, Docker build verification
@@ -257,8 +325,8 @@ To publish a release, bump `version` in `pyproject.toml` on a `chore/release-vX.
 branch, merge that PR to `main`, then tag the merge commit and push the tag:
 
 ```sh
-git tag -a v1.21.0 -m "Release v1.21.0"
-git push origin v1.21.0
+git tag -a v1.22.0 -m "Release v1.22.0"
+git push origin v1.22.0
 ```
 
 ## Development
