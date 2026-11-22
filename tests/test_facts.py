@@ -1093,3 +1093,244 @@ def test_review_n6_schema_ddl_is_one_shot_for_existing_file(store):
         store.ingest_candidate(claim(2))
     assert sum("CREATE TABLE IF NOT EXISTS facts" in sql for sql in traces) == 1
     assert store.read("person:owner", "employment.employer")["state"] == "resolved"
+
+
+@pytest.mark.parametrize("token", ["synthetic-only", None, "wrong"])
+@pytest.mark.parametrize(
+    "keys",
+    [
+        "%66act_subject=person:owner&%66act_predicate=employment.employer",
+        "fact_subject=person:owner&%66act_predicate=employment.employer",
+        "%66act_subject=person:owner&fact_predicate=employment.employer",
+    ],
+)
+def test_review2_f1_encoded_private_keys_never_enter_any_logs(api, caplog, token, keys):
+    import logging
+
+    path = (
+        "/unified/search?q=PRIVATE_LOG_MARKER&"
+        + keys
+        + "&%66act_item_key=PRIVATE_ITEM_MARKER&%66act_as_of=PRIVATE_DATE_MARKER"
+    )
+    with caplog.at_level(logging.INFO, logger="memory_store"):
+        assert api("GET", path, token=token)[0] == (400 if token == "synthetic-only" else 401)
+    assert "path=/unified/search" in caplog.text
+    for value in [
+        "PRIVATE_LOG_MARKER",
+        "PRIVATE_ITEM_MARKER",
+        "PRIVATE_DATE_MARKER",
+        "person:owner",
+        "employment.employer",
+        "%66act_",
+        "?q=",
+    ]:
+        assert value not in caplog.text
+
+
+def test_review2_f1_encoded_keys_success_masks_both_search_and_access_logs(api, caplog):
+    import logging
+
+    path = (
+        "/unified/search?q=PRIVATE_LOG_MARKER&%66act_subject=person:owner"
+        "&%66act_predicate=employment.employer&%66act_item_key=PRIVATE_ITEM_MARKER"
+        "&%66act_as_of=2026-11-22"
+    )
+    with (
+        caplog.at_level(logging.INFO, logger="memory_store"),
+        patch.object(server, "unified_search_with_coverage", return_value=([], [], {}, {})),
+    ):
+        status, body = api("GET", path)
+    assert status == 200 and "current_state" in body
+    assert "[fact lookup]" in caplog.text and "path=/unified/search" in caplog.text
+    for value in [
+        "PRIVATE_LOG_MARKER",
+        "PRIVATE_ITEM_MARKER",
+        "2026-11-22",
+        "person:owner",
+        "%66act_",
+    ]:
+        assert value not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/facts/current?subject=PRIVATE_SUBJECT&predicate=PRIVATE_PREDICATE&q=PRIVATE_LOG_MARKER",
+        "/facts/unknown?extra=PRIVATE_LOG_MARKER",
+        "/%66acts/current?subject=PRIVATE_SUBJECT&q=PRIVATE_LOG_MARKER",
+    ],
+)
+def test_review2_f1_fact_routes_log_only_normalized_safe_path(api, caplog, path):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="memory_store"):
+        api("GET", path, token=None)
+    assert "private fact request path=/facts/" in caplog.text
+    assert "PRIVATE_" not in caplog.text and "?" not in caplog.text
+
+
+def test_review2_f1_classifier_handles_blank_keys_and_malformed_targets():
+    assert server.private_fact_log_path("/unified/search?%66act_subject=") == "/unified/search"
+    assert server.private_fact_log_path("/unified/search?FACT_ITEM_KEY=value") == "/unified/search"
+    assert server.private_fact_log_path("/facts/../facts/current?q=private") == "/facts/current"
+    assert server.private_fact_log_path("//[bad") == "/"
+    assert server.private_fact_log_path("/search?q=ordinary") is None
+
+
+def test_review2_f2_confirmation_ref_secret_rejected_before_file_or_write(store):
+    d = store.draft(draft())
+    bad = dict(CONFIRM, session_ref="session:synthetic#password:FAKE_ONLY")
+    with pytest.raises(FactError, match="credential-like"):
+        store.confirm(d["draft_id"], bad)
+    assert not Path(store.path).exists()
+    # Invalid metadata does not consume the legitimate unexpired draft.
+    store.confirm(d["draft_id"], CONFIRM)
+    before = Path(store.path).read_bytes()
+    next_draft = store.draft(draft(value="Next synthetic org"))
+    with pytest.raises(FactError, match="credential-like"):
+        store.confirm(next_draft["draft_id"], bad)
+    assert Path(store.path).read_bytes() == before
+    assert b"FAKE_ONLY" not in before
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "notes",
+        "item_key",
+        "main_ref",
+        "main_locator",
+        "main_extractor",
+        "evidence_ref",
+        "evidence_locator",
+        "evidence_extractor",
+        "nested_value",
+    ],
+)
+def test_review2_f2_all_retained_ingestion_text_screened_before_file(store, field):
+    fact = claim()
+    marker = "password:FAKE_INGEST_ONLY"
+    if field in {"notes", "item_key"}:
+        fact[field] = marker
+        if field == "item_key":
+            fact.update(
+                predicate="vehicle.owned",
+                value_type="structured",
+                value={"vehicle": "example"},
+                privacy_class="financial",
+            )
+    elif field == "nested_value":
+        fact.update(
+            predicate="vehicle.owned",
+            value_type="structured",
+            value={"nested": {"text": marker}},
+            item_key="car_a",
+            privacy_class="financial",
+        )
+    else:
+        location, key = field.split("_", 1)
+        provenance = {**fact["provenance"]}
+        provenance[{"ref": "ref", "locator": "locator", "extractor": "extractor"}[key]] = marker
+        if location == "main":
+            fact["provenance"] = provenance
+        else:
+            fact["evidence"] = [provenance]
+    with pytest.raises(FactError, match="credential-like"):
+        store.ingest_candidate(fact)
+    assert not Path(store.path).exists()
+
+
+def test_review2_f2_only_schema_digest_locations_are_exempt(store):
+    fact = claim()
+    fact["provenance"]["content_sha256"] = "a" * 64
+    fact["evidence"] = [
+        {**fact["provenance"], "ref": "synthetic/evidence", "content_sha256": "b" * 64}
+    ]
+    store.ingest_candidate(fact)
+    assert store.read("person:owner", "employment.employer")["current"] == fact
+    before = Path(store.path).read_bytes()
+    disguised = claim(
+        2,
+        predicate="vehicle.owned",
+        value_type="structured",
+        value={"content_sha256": "c" * 64},
+        item_key="car_a",
+        privacy_class="financial",
+    )
+    with pytest.raises(FactError, match="credential-like"):
+        store.ingest_candidate(disguised)
+    assert Path(store.path).read_bytes() == before
+    invalid_digest = claim(3)
+    invalid_digest["provenance"]["content_sha256"] = "password:FAKE_ONLY"
+    with pytest.raises(FactError):
+        store.ingest_candidate(invalid_digest)
+    assert Path(store.path).read_bytes() == before
+
+
+def test_review2_f3_tombstoned_id_cannot_be_reused_and_fresh_id_can_be_forgotten(store):
+    first = claim(1, value="First synthetic value")
+    store.ingest_candidate(first)
+    d = store.draft(
+        draft(action="retract", value=first["value"], target_fact_ids=[first["fact_id"]])
+    )
+    store.confirm(d["draft_id"], CONFIRM)
+    before = Path(store.path).read_bytes()
+    reused = dict(
+        first,
+        value="SECOND_PRIVATE_MARKER",
+        provenance={**first["provenance"], "ref": "synthetic/different-source"},
+    )
+    with pytest.raises(FactError, match="permanently reserved"):
+        store.ingest_candidate(reused)
+    assert Path(store.path).read_bytes() == before
+    assert store.read("person:owner", "employment.employer")["state"] == "not_found"
+    fresh = dict(reused, fact_id="f_00000002")
+    store.ingest_candidate(fresh)
+    d = store.draft(
+        draft(action="retract", value=fresh["value"], target_fact_ids=[fresh["fact_id"]])
+    )
+    store.confirm(d["draft_id"], CONFIRM)
+    assert store.read("person:owner", "employment.employer")["state"] == "not_found"
+    assert b"SECOND_PRIVATE_MARKER" not in Path(store.path).read_bytes()
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT count(*) FROM tombstones").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM facts").fetchone()[0] == 0
+
+
+def test_review2_f3_lifecycle_alone_reserves_ids_and_internal_save_fails_closed(store):
+    fact = claim()
+    with store._db() as db:
+        store._audit(db, fact["fact_id"], "retract", "candidate", "retracted")
+    with pytest.raises(FactError, match="permanently reserved"):
+        store.ingest_candidate(fact)
+    with pytest.raises(FactError, match="permanently reserved"), store._db() as db:
+        store._save(db, fact, "ingest")
+    assert store.read("person:owner", "employment.employer")["state"] == "not_found"
+
+
+def test_review2_f1_fact_marked_legacy_unified_query_also_redacts_application_log(api, caplog):
+    import logging
+
+    with (
+        caplog.at_level(logging.INFO, logger="memory_store"),
+        patch.object(server, "unified_search_with_coverage", return_value=([], [], {}, {})),
+    ):
+        status, body = api(
+            "GET", "/unified/search?q=PRIVATE_LOG_MARKER&%66act_item_key=PRIVATE_ITEM_MARKER"
+        )
+    assert status == 200 and "current_state" not in body
+    assert "[fact lookup]" in caplog.text
+    assert "PRIVATE_" not in caplog.text
+
+
+def test_review2_f1_malformed_protocol_cannot_echo_private_raw_requestline(api, caplog):
+    import logging
+
+    line = (
+        b"GET /unified/search?q=PRIVATE_LOG_MARKER&%66act_subject=PRIVATE_SUBJECT HTTP/9.9\r\n\r\n"
+    )
+    with caplog.at_level(logging.INFO, logger="memory_store"):
+        response = raw_request(api.address, line)
+    assert b"Error response" in response
+    assert "request rejected before route parsing" in caplog.text
+    assert "PRIVATE_" not in caplog.text and "%66act_" not in caplog.text

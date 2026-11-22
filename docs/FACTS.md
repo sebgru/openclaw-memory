@@ -230,3 +230,24 @@ measured workload. The HMAC salt is stored in the same private DB: suppression
 keys avoid raw source text in tombstones but **are not anonymization against a DB
 reader**. Low-entropy source/slot guesses can be tested by someone with that DB.
 The isolation/token boundary, not that hash, protects private data.
+
+## Retained-input and log boundaries
+
+Credential screening runs before a confirmation opens any transaction and before
+candidate ingestion creates/opens the DB. It covers every retained free-text
+field, including notes, item keys, source/evidence refs, locators, extractor names
+and confirmation message refs; lifecycle saves enforce the same invariant.
+Only the schema-validated `content_sha256` fields directly inside provenance and
+evidence provenance are exempt from credential heuristics. A similarly named key
+inside an arbitrary structured claim is not an exemption.
+
+Fact IDs are permanently reserved across live facts, tombstones and lifecycle
+history. A forgotten ID cannot be ingested again even with a different source.
+New assertions need fresh IDs; this preserves identity and allows subsequent
+forgetting without overwriting prior tombstones.
+
+Private-request access logging classifies decoded query keys and normalized
+paths, including percent-encoded fact keys, errors and unauthorized requests.
+It logs only an allowlisted route path (or a generic private path for unknown
+fact routes), never the query string. Application query logging uses the same
+classifier, including fact-marked requests that remain on the legacy search lane.

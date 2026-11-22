@@ -3,11 +3,12 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import sqlite3
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .document_indexer import DocumentIndexer, IndexBusyError
 from .embeddings import EmbeddingClient
@@ -497,6 +498,32 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool"):
     return apply_search_profile(results, limit, profile), warnings, coverage, degraded
 
 
+def private_fact_log_path(target):
+    """Decode exactly as routing does; never return private query text for logging."""
+    try:
+        parsed = urlparse(target)
+        path = "/" + posixpath.normpath(unquote(parsed.path)).lstrip("/")
+        keys = parse_qs(parsed.query, keep_blank_values=True)
+    except ValueError:
+        # Malformed targets are not safe to echo into access logs either.
+        return "/"
+    if (
+        path == "/facts"
+        or path.startswith("/facts/")
+        or any(key.casefold().startswith("fact_") for key in keys)
+    ):
+        known_paths = {
+            "/facts/drafts",
+            "/facts/confirm",
+            "/facts/end",
+            "/facts/retract",
+            "/facts/current",
+            "/unified/search",
+        }
+        return path if path in known_paths else "/facts/"
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, code, payload):
         data = json.dumps(payload).encode()
@@ -735,7 +762,9 @@ class Handler(BaseHTTPRequestHandler):
                 logger.info(
                     "%s q=%r limit=%d results=%d took=%.1fms",
                     parsed.path,
-                    query,
+                    "[fact lookup]"
+                    if FACTS_ENABLED and private_fact_log_path(self.path) is not None
+                    else query,
                     limit,
                     len(results),
                     (time.monotonic() - started) * 1000,
@@ -798,7 +827,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(404, {"error": str(exc)})
             logger.info(
                 "/unified/search q=%r scope=%s profile=%s limit=%d results=%d warnings=%d took=%.1fms",
-                "[fact lookup]" if current_state is not None else query,
+                "[fact lookup]"
+                if FACTS_ENABLED and private_fact_log_path(self.path) is not None
+                else query,
                 scope,
                 profile,
                 limit,
@@ -913,11 +944,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(400, {"error": str(exc)})
 
     def log_message(self, format, *args):
+        if FACTS_ENABLED and not hasattr(self, "path"):
+            # parse_request may log the raw request line before setting path.
+            logger.info("request rejected before route parsing")
+            return
         path = getattr(self, "path", "")
-        if FACTS_ENABLED and (
-            path.startswith("/facts/") or "fact_subject=" in path or "fact_predicate=" in path
-        ):
-            logger.info("private fact request completed")
+        fact_path = private_fact_log_path(path) if FACTS_ENABLED else None
+        if fact_path is not None:
+            logger.info("private fact request path=%s", fact_path)
         else:
             logger.info("%s - %s", self.address_string(), format % args)
 

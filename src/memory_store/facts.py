@@ -114,6 +114,14 @@ def screen(payload):
     walk(payload)
 
 
+def screen_retained_fact(fact):
+    """Screen every stored field, exempting only schema-validated digest locations."""
+    payload = copy.deepcopy(fact)
+    for provenance in [payload["provenance"], *payload.get("evidence", [])]:
+        provenance.pop("content_sha256", None)
+    screen(payload)
+
+
 def semantics(fact):
     predicate = fact["predicate"]
     if predicate not in REGISTRY:
@@ -381,6 +389,7 @@ class FactStore:
                   BEGIN SELECT RAISE(ABORT,'append only'); END;
                 CREATE TABLE IF NOT EXISTS tombstones (fact_id TEXT PRIMARY KEY,payload TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS lifecycle_fact_id ON lifecycle(fact_id);
                 """)
                 db.execute("BEGIN IMMEDIATE")
                 if initialize:
@@ -449,8 +458,21 @@ class FactStore:
             (stamp(self.clock()), "openclaw_instance", fact_id, action, prior, status),
         )
 
+    @staticmethod
+    def _id_reserved(db, fact_id):
+        return (
+            db.execute(
+                "SELECT 1 FROM facts WHERE fact_id=? UNION ALL "
+                "SELECT 1 FROM tombstones WHERE fact_id=? UNION ALL "
+                "SELECT 1 FROM lifecycle WHERE fact_id=? LIMIT 1",
+                (fact_id, fact_id, fact_id),
+            ).fetchone()
+            is not None
+        )
+
     def _save(self, db, fact, action, prior=None):
         validate("Fact", fact)
+        screen_retained_fact(fact)
         previous = db.execute(
             "SELECT payload FROM facts WHERE fact_id=?", (fact["fact_id"],)
         ).fetchone()
@@ -461,6 +483,8 @@ class FactStore:
                 k: v for k, v in fact.items() if k not in lifecycle_fields
             }:
                 raise FactError("claim payloads are immutable")
+        elif self._id_reserved(db, fact["fact_id"]):
+            raise FactError("fact id permanently reserved")
         db.execute(
             "INSERT INTO facts VALUES(?,?,?,?,?) ON CONFLICT(fact_id) DO UPDATE SET payload=excluded.payload",
             (fact["fact_id"], *slot(fact), json.dumps(fact)),
@@ -475,18 +499,12 @@ class FactStore:
         for provenance in [fact["provenance"], *fact.get("evidence", [])]:
             if provenance["evidence_date"] is not None:
                 instant(provenance["evidence_date"])
-        screen(
-            {
-                "predicate": fact["predicate"],
-                "value": fact["value"],
-                "source": fact["provenance"]["ref"],
-            }
-        )
+        screen_retained_fact(fact)
         if fact["status"] != "candidate" or fact["source_class"] == "owner_stated":
             raise FactError("ingestion cannot assert owner authority")
         with self._db() as db:
-            if db.execute("SELECT 1 FROM facts WHERE fact_id=?", (fact["fact_id"],)).fetchone():
-                raise FactError("immutable claim already exists")
+            if self._id_reserved(db, fact["fact_id"]):
+                raise FactError("fact id permanently reserved")
             key = self._suppression_key(db, fact)
             if any(
                 json.loads(row[0]).get("suppression_key") == key
@@ -598,6 +616,7 @@ class FactStore:
         self._enabled()
         self._prune_drafts()
         validate("Confirmation", confirmation)
+        screen(confirmation)
         confirmation = {**confirmation, "assurance": "agent_asserted"}
         with self._lock:
             draft = self._drafts.get(draft_id)
