@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import posixpath
+import secrets
 import sqlite3
 import threading
 import time
@@ -96,6 +97,39 @@ documents_vector_store = (
     if DOCUMENTS_ROOT and os.getenv("QDRANT_URL")
     else None
 )
+# Mail is never searched by ordinary all-scope calls. The private-chat adapter must
+# explicitly select it and supply a distinct capability token after checking owner identity.
+MAIL_PATH = os.getenv("MAIL_SQLITE_PATH")
+MAIL_TOKEN = os.getenv("MAIL_ACCESS_TOKEN", "")
+if MAIL_PATH and not os.path.isabs(MAIL_PATH):
+    raise ValueError("mail database path must be absolute")
+if MAIL_PATH and os.path.realpath(MAIL_PATH) in {
+    os.path.realpath(os.getenv(name, default))
+    for name, default in (
+        ("SQLITE_PATH", "memory.db"),
+        ("ARCHIVE_SQLITE_PATH", "archive.db"),
+        ("DOCUMENTS_SQLITE_PATH", "documents.db"),
+    )
+}:
+    raise ValueError("mail database must be separate from other scopes")
+mail_store = SQLiteStore(MAIL_PATH, DIM) if MAIL_PATH and MAIL_TOKEN else None
+MAIL_COLLECTION = os.getenv("MAIL_QDRANT_COLLECTION", "mail-private")
+if mail_store and (
+    not MAIL_COLLECTION.startswith("mail-")
+    or MAIL_COLLECTION
+    in {
+        os.getenv("QDRANT_COLLECTION", "memory"),
+        os.getenv("ARCHIVE_QDRANT_COLLECTION", "memory-archive"),
+        os.getenv("DOCUMENTS_QDRANT_COLLECTION", "documents"),
+    }
+):
+    raise ValueError("mail collection must use a separate mail- namespace")
+mail_vector_store = (
+    QdrantStore(os.getenv("QDRANT_URL"), MAIL_COLLECTION, DIM)
+    if mail_store and os.getenv("QDRANT_URL")
+    else None
+)
+
 DOCUMENTS_INCLUDE_PATTERNS = patterns("DOCUMENTS_INCLUDE_PATTERNS", "**/*.md")
 DOCUMENTS_EXCLUDE_PATTERNS = patterns("DOCUMENTS_EXCLUDE_PATTERNS", "")
 # Default OFF: prepend "title | date | category" to document text before embedding/FTS.
@@ -471,8 +505,51 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool", *, d
     ``unavailable`` (requested by scope but not configured or failed) or
     ``not_searched`` (excluded by scope).
     """
+    if scope == "mail":
+        if profile not in {"tool", "prompt"}:
+            raise ValueError("profile must be one of tool, prompt")
+        if mail_store is None:
+            raise LookupError("mail is not configured")
+        coverage = dict.fromkeys((*COVERAGE_SOURCES, "mail"), "not_searched")
+        try:
+            rows = hybrid_search(query, limit * 3, mail_store, mail_vector_store)
+        except Exception:
+            coverage["mail"] = "unavailable"
+            return [], ["mail: search backend unavailable"], coverage, {}
+        coverage["mail"] = "searched"
+        results = [
+            {
+                **row,
+                "source": "mail",
+                "id": unified_result_id(row, "mail"),
+                "provenance": result_provenance(row, "mail"),
+            }
+            for row in rows
+        ]
+        # One result per message, not three chunks from one long mail.
+        unique: dict[str, dict] = {}
+        for row in results:
+            unique.setdefault(row["path"], row)
+        results = list(unique.values())[:limit]
+        with mail_store._read_connection() as db:
+            metadata_exists = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mail_metadata'"
+            ).fetchone()
+            if metadata_exists:
+                for row in results:
+                    meta = db.execute(
+                        "SELECT subject, sender, date FROM mail_metadata WHERE path=?",
+                        (row["path"],),
+                    ).fetchone()
+                    if meta:
+                        row["mail"] = dict(meta)
+        fallback = mail_vector_store is None or getattr(_search_state, "lexical_fallback", False)
+        warnings = (
+            ["mail: semantic search unavailable, lexical (FTS) fallback used"] if fallback else []
+        )
+        return results, warnings, coverage, {"mail": "lexical_fallback"} if fallback else {}
     if scope not in {"all", "main", "archive", "documents"}:
-        raise ValueError("scope must be one of all, main, archive, documents")
+        raise ValueError("scope must be one of all, main, archive, documents, mail")
     if profile not in {"tool", "prompt"}:
         raise ValueError("profile must be one of tool, prompt")
     if scope == "archive" and not archive_store:
@@ -945,6 +1022,13 @@ class Handler(BaseHTTPRequestHandler):
             query = params.get("q", [""])[0]
             scope = params.get("scope", ["all"])[0]
             profile = params.get("profile", ["tool"])[0]
+            if scope == "mail" and (
+                not MAIL_TOKEN
+                or not secrets.compare_digest(
+                    self.headers.get("X-Mail-Access", "").encode(), MAIL_TOKEN.encode()
+                )
+            ):
+                return self.send_json(403, {"error": "mail access denied"})
             try:
                 limit = int(params.get("limit", [10])[0])
             except ValueError:
@@ -953,9 +1037,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(
                     400, {"error": "q is required and limit must be between 1 and 100"}
                 )
-            if scope not in {"all", "main", "archive", "documents"}:
+            if scope not in {"all", "main", "archive", "documents", "mail"}:
                 return self.send_json(
-                    400, {"error": "scope must be one of all, main, archive, documents"}
+                    400, {"error": "scope must be one of all, main, archive, documents, mail"}
                 )
             if profile not in {"tool", "prompt"}:
                 return self.send_json(400, {"error": "profile must be one of tool, prompt"})
