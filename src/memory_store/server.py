@@ -511,8 +511,16 @@ def unified_search_with_coverage(query, limit, scope="all", profile="tool", *, d
         if mail_store is None:
             raise LookupError("mail is not configured")
         coverage = dict.fromkeys((*COVERAGE_SOURCES, "mail"), "not_searched")
+        mode = os.getenv("UNIFIED_FUSION_MODE", "legacy").strip().lower()
+        if mode not in {"legacy", "rrf"}:
+            raise ValueError("UNIFIED_FUSION_MODE must be legacy or rrf")
+        previous_mode = getattr(_search_state, "rank_fusion", False)
         try:
-            rows = hybrid_search(query, limit * 3, mail_store, mail_vector_store)
+            _search_state.rank_fusion = mode == "rrf"
+            try:
+                rows = hybrid_search(query, limit * 3, mail_store, mail_vector_store)
+            finally:
+                _search_state.rank_fusion = previous_mode
         except Exception:
             coverage["mail"] = "unavailable"
             return [], ["mail: search backend unavailable"], coverage, {}

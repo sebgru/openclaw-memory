@@ -224,3 +224,25 @@ def test_nullable_graph_sender(tmp_path):
     store = SQLiteStore(str(db))
     assert store.db.execute("SELECT sender FROM mail_metadata").fetchone()[0] == ""
     store.db.close()
+
+
+def test_mail_honors_existing_fusion_configuration(tmp_path, monkeypatch):
+    from memory_store import server
+
+    mail = SQLiteStore(str(tmp_path / "mail.sqlite"))
+    monkeypatch.setattr(server, "mail_store", mail)
+    monkeypatch.setattr(server._search_state, "rank_fusion", False, raising=False)
+    seen = []
+    monkeypatch.setattr(
+        server, "hybrid_search", lambda *a: seen.append(server._search_state.rank_fusion) or []
+    )
+    try:
+        monkeypatch.setenv("UNIFIED_FUSION_MODE", "rrf")
+        server.unified_search_with_coverage("query", 3, "mail")
+        assert seen == [True]
+        assert server._search_state.rank_fusion is False
+        monkeypatch.setenv("UNIFIED_FUSION_MODE", "invalid")
+        with pytest.raises(ValueError, match="UNIFIED_FUSION_MODE"):
+            server.unified_search_with_coverage("query", 3, "mail")
+    finally:
+        mail.db.close()
