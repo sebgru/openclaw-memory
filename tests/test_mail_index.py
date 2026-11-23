@@ -207,3 +207,20 @@ def test_mail_lane_failure_provenance_and_message_collapse(tmp_path, monkeypatch
             server.unified_search_with_coverage("x", 1, "mail")
     finally:
         mail.db.close()
+
+
+def test_nullable_graph_sender(tmp_path):
+    root, db = tmp_path / "export", tmp_path / "mail.sqlite"
+    snapshot(root, {"message.md": "# Contract\nTerms"})
+    (root / "current/state.json").write_text(
+        json.dumps(
+            {
+                "aliases": {"invented": "message.md"},
+                "records": {"invented": {"subject": "Contract", "from": None}},
+            }
+        )
+    )
+    assert build(str(root), str(db))["added"] == 1
+    store = SQLiteStore(str(db))
+    assert store.db.execute("SELECT sender FROM mail_metadata").fetchone()[0] == ""
+    store.db.close()

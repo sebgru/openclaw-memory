@@ -39,6 +39,10 @@ def _build(
     target.chmod(0o600)
     store = SQLiteStore(str(target), dimensions)
     try:
+        # Mailboxes are much larger than curated memory. Avoid quadratic path scans
+        # during each upsert/delete while retaining the existing SQLiteStore schema.
+        store.db.execute("CREATE INDEX IF NOT EXISTS idx_mail_chunks_path ON chunks(path)")
+        store.db.commit()
         vectors = QdrantStore(qdrant_url, collection, dimensions) if qdrant_url else None
         # Resolve the generation once: an exporter publication cannot mix two snapshots.
         generation = (root / "current").resolve()
@@ -54,7 +58,7 @@ def _build(
             store.db.execute("DELETE FROM mail_metadata")
             for message_id, filename in state.get("aliases", {}).items():
                 message = state["records"][message_id]
-                sender = message.get("from", {}).get("emailAddress", {}).get("address", "")
+                sender = ((message.get("from") or {}).get("emailAddress") or {}).get("address", "")
                 store.db.execute(
                     "INSERT OR IGNORE INTO mail_metadata VALUES (?,?,?,?)",
                     (
