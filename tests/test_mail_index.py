@@ -133,11 +133,17 @@ def test_structured_provenance_and_optional_vectors(tmp_path, monkeypatch, capsy
         def __init__(self, url, collection, dimensions):
             calls.append((url, collection, dimensions))
 
+        def ensure_collection(self):
+            pass
+
+        def delete_file(self, path):
+            calls.append("delete")
+
         def upsert(self, records, embed):
             assert records
             calls.append("upsert")
 
-    monkeypatch.setattr(mail_index, "QdrantStore", Vectors)
+    monkeypatch.setattr(mail_index, "MailQdrantStore", Vectors)
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -149,12 +155,12 @@ def test_structured_provenance_and_optional_vectors(tmp_path, monkeypatch, capsy
             "--qdrant-url",
             "http://example.invalid",
             "--collection",
-            "mail-fixture",
+            "mail-private-fixture",
         ],
     )
     mail_index.main()
     assert json.loads(capsys.readouterr().out)["added"] == 1
-    assert calls == [("http://example.invalid", "mail-fixture", 128), "upsert"]
+    assert calls == [("http://example.invalid", "mail-private-fixture", 128), "delete", "upsert"]
     store = SQLiteStore(str(db))
     assert tuple(
         store.db.execute("SELECT subject, sender, date FROM mail_metadata").fetchone()
@@ -246,3 +252,278 @@ def test_mail_honors_existing_fusion_configuration(tmp_path, monkeypatch):
             server.unified_search_with_coverage("query", 3, "mail")
     finally:
         mail.db.close()
+
+
+class FaultVectors:
+    """Persistent fake remote service, including partially applied operations."""
+
+    def __init__(self):
+        self.points = {}
+        self.fail = None
+
+    def ensure_collection(self):
+        pass
+
+    def delete_file(self, path):
+        if self.fail == "before_delete":
+            self.fail = None
+            raise RuntimeError("injected delete failure")
+        self.points = {key: row for key, row in self.points.items() if row["path"] != path}
+        if self.fail == "after_delete":
+            self.fail = None
+            raise RuntimeError("injected delete acknowledgement failure")
+
+    def upsert(self, records, embed):
+        from memory_store.qdrant import point_id
+
+        if self.fail == "before_upsert":
+            self.fail = None
+            raise RuntimeError("injected upsert failure")
+        for cid, path, heading, body, line in records:
+            key = point_id(cid)
+            self.points[key] = {
+                "id": key,
+                "path": path,
+                "heading": heading,
+                "text": body,
+                "line": line,
+                "score": 0.95,
+            }
+            if self.fail == "partial_upsert":
+                self.fail = None
+                raise RuntimeError("injected partial batch failure")
+        if self.fail == "after_upsert":
+            self.fail = None
+            raise RuntimeError("injected upsert acknowledgement failure")
+
+    def search(self, vector, limit):
+        return list(self.points.values())[:limit]
+
+
+def queue_paths(database):
+    import sqlite3
+
+    with sqlite3.connect(database) as db:
+        return [row[0] for row in db.execute("SELECT path FROM mail_vector_pending ORDER BY path")]
+
+
+def install_vectors(monkeypatch):
+    from memory_store import mail_index
+
+    vectors = FaultVectors()
+    monkeypatch.delenv("EMBEDDING_URL", raising=False)
+    monkeypatch.setattr(mail_index, "MailQdrantStore", lambda *a: vectors)
+    return vectors
+
+
+def assert_vector_parity(database, vectors):
+    from memory_store.qdrant import point_id
+
+    store = SQLiteStore(str(database))
+    try:
+        expected = {
+            point_id(row["id"]): (row["path"], row["body"])
+            for row in store.db.execute("SELECT * FROM chunks")
+        }
+        assert expected == {key: (row["path"], row["text"]) for key, row in vectors.points.items()}
+    finally:
+        store.db.close()
+
+
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize(
+    "failure", ["before_upsert", "partial_upsert", "after_upsert", "before_delete", "after_delete"]
+)
+def test_vector_failures_are_durable_and_converge(tmp_path, monkeypatch, changed, failure):
+    root, db = tmp_path / "export", tmp_path / "mail.sqlite"
+    vectors = install_vectors(monkeypatch)
+    if changed:
+        snapshot(root, {"one.md": "# Old terms\nObsolete warranty"})
+        build(str(root), str(db), qdrant_url="http://example.invalid")
+    snapshot(root, {"one.md": "# Current terms\n" + ("Current fixture facts. " * 160)})
+    vectors.fail = failure
+    with pytest.raises(RuntimeError, match="injected"):
+        build(str(root), str(db), qdrant_url="http://example.invalid")
+    assert queue_paths(db) == ["one.md"]
+    # A new build reopens SQLite: digest equality must not skip pending vectors.
+    assert build(str(root), str(db), qdrant_url="http://example.invalid")["unchanged"] == 1
+    assert queue_paths(db) == []
+    assert len(vectors.points) > 1  # partial batch probe is discriminating
+    assert_vector_parity(db, vectors)
+    assert build(str(root), str(db), qdrant_url="http://example.invalid")["unchanged"] == 1
+    assert_vector_parity(db, vectors)
+
+
+@pytest.mark.parametrize("failure", ["before_delete", "after_delete"])
+@pytest.mark.parametrize("readd", [False, True])
+def test_deletion_tombstones_retry_and_stale_search_is_rejected(
+    tmp_path, monkeypatch, failure, readd
+):
+    from memory_store import server
+
+    root, db = tmp_path / "export", tmp_path / "mail.sqlite"
+    vectors = install_vectors(monkeypatch)
+    snapshot(root, {"one.md": "# Warranty\nOriginal fixture terms"})
+    build(str(root), str(db), qdrant_url="http://example.invalid")
+    snapshot(root, {})
+    vectors.fail = failure
+    with pytest.raises(RuntimeError, match="injected"):
+        build(str(root), str(db), qdrant_url="http://example.invalid")
+    assert queue_paths(db) == ["one.md"]
+    mail = SQLiteStore(str(db))
+    monkeypatch.setattr(server, "mail_store", mail)
+    monkeypatch.setattr(server, "mail_vector_store", vectors)
+    try:
+        # Exercise the actual hybrid ranker and mail lane, not a stubbed search.
+        assert server.hybrid_search("warranty", 3, mail, vectors) == []
+        assert server.unified_search_with_coverage("warranty", 3, "mail")[0] == []
+    finally:
+        mail.db.close()
+    if readd:
+        snapshot(root, {"one.md": "# Warranty\nNew permitted fixture terms"})
+    stats = build(str(root), str(db), qdrant_url="http://example.invalid")
+    assert stats["added"] == int(readd)
+    assert queue_paths(db) == []
+    assert_vector_parity(db, vectors)
+    assert bool(vectors.points) == readd
+
+
+def test_changed_mail_rejects_old_and_tampered_vector_payloads(tmp_path, monkeypatch):
+    from memory_store import server
+
+    root, db = tmp_path / "export", tmp_path / "mail.sqlite"
+    vectors = install_vectors(monkeypatch)
+    snapshot(root, {"one.md": "# Warranty\nOld terms"})
+    build(str(root), str(db), qdrant_url="http://example.invalid")
+    snapshot(root, {"one.md": "# Warranty\nCurrent terms"})
+    vectors.fail = "before_delete"
+    with pytest.raises(RuntimeError):
+        build(str(root), str(db), qdrant_url="http://example.invalid")
+    mail = SQLiteStore(str(db))
+    monkeypatch.setattr(server, "mail_store", mail)
+    monkeypatch.setattr(server, "mail_vector_store", vectors)
+    try:
+        assert server.hybrid_search("unrelatedzzzz", 3, mail, vectors) == []
+        build(str(root), str(db), qdrant_url="http://example.invalid")
+        result = server.hybrid_search("unrelatedzzzz", 3, mail, vectors)
+        assert len(result) == 1 and result[0]["text"] == "Current terms"
+        next(iter(vectors.points.values()))["text"] = "Untrusted old content"
+        assert server.hybrid_search("unrelatedzzzz", 3, mail, vectors) == []
+    finally:
+        mail.db.close()
+
+
+def test_remote_success_before_local_acknowledgement_retries(tmp_path, monkeypatch):
+    root, db = tmp_path / "export", tmp_path / "mail.sqlite"
+    vectors = install_vectors(monkeypatch)
+    snapshot(root, {"one.md": "# Warranty\nTerms"})
+    build(str(root), str(db))  # lexical-only still journals pending vectors
+    store = SQLiteStore(str(db))
+    store.db.execute(
+        "CREATE TRIGGER fail_ack BEFORE DELETE ON mail_vector_pending "
+        "BEGIN SELECT RAISE(FAIL, 'injected local acknowledgement failure'); END"
+    )
+    store.db.commit()
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected local"):
+        build(str(root), str(db), qdrant_url="http://example.invalid")
+    assert vectors.points and queue_paths(db) == ["one.md"]
+    store.db.execute("DROP TRIGGER fail_ack")
+    store.db.commit()
+    store.db.close()
+    build(str(root), str(db), qdrant_url="http://example.invalid")
+    assert queue_paths(db) == []
+    assert_vector_parity(db, vectors)
+
+
+def test_queue_backfills_preexisting_files_once_and_is_atomic(tmp_path, monkeypatch):
+    from memory_store import mail_index
+
+    root, db = tmp_path / "export", tmp_path / "mail.sqlite"
+    vectors = install_vectors(monkeypatch)
+    snapshot(root, {"one.md": "# Warranty\nTerms"})
+    store = SQLiteStore(str(db))
+    # Simulate the previous mail builder, with no durable queue yet.
+    from memory_store.indexer import Indexer
+
+    Indexer(root / "current/mail", store).scan()
+    store.db.close()
+    assert build(str(root), str(db), qdrant_url="http://example.invalid")["unchanged"] == 1
+    assert_vector_parity(db, vectors)
+    assert queue_paths(db) == []
+    # No full vector rewrite on an unchanged build (or it would raise).
+    vectors.fail = "before_delete"
+    build(str(root), str(db), qdrant_url="http://example.invalid")
+    assert vectors.fail == "before_delete"
+    store = SQLiteStore(str(db))
+    mail_index._prepare_vector_queue(store)
+    with pytest.raises(RuntimeError):
+        with store.db:
+            store.db.execute("DELETE FROM files WHERE path='one.md'")
+            raise RuntimeError("injected SQLite rollback")
+    assert store.file_digest("one.md")
+    assert queue_paths(db) == []
+    store.db.close()
+
+
+@pytest.mark.parametrize("collection", ["mail-shared", "mail-privateish", "documents", "", "mail-"])
+def test_builder_refuses_non_private_namespace_before_initialization(
+    tmp_path, monkeypatch, collection
+):
+    from memory_store import mail_index
+
+    root, db = tmp_path / "export", tmp_path / "mail.sqlite"
+    snapshot(root, {})
+    monkeypatch.setattr(mail_index, "SQLiteStore", lambda *a: pytest.fail("SQLite initialized"))
+    monkeypatch.setattr(
+        mail_index, "MailQdrantStore", lambda *a: pytest.fail("vectors initialized")
+    )
+    with pytest.raises(ValueError, match="namespace"):
+        build(str(root), str(db), qdrant_url="http://example.invalid", collection=collection)
+    assert not db.exists()
+    assert not (root / ".sync.lock").exists()
+
+
+@pytest.mark.parametrize(
+    "scope", ["QDRANT_COLLECTION", "ARCHIVE_QDRANT_COLLECTION", "DOCUMENTS_QDRANT_COLLECTION"]
+)
+@pytest.mark.parametrize("collection", ["mail-private", "mail-private-fixture"])
+def test_builder_refuses_each_configured_collection_collision(
+    tmp_path, monkeypatch, scope, collection
+):
+    from memory_store import mail_index
+
+    root, db = tmp_path / "export", tmp_path / "mail.sqlite"
+    snapshot(root, {})
+    monkeypatch.setenv(scope, collection)
+    monkeypatch.setattr(
+        mail_index, "EmbeddingClient", lambda *a: pytest.fail("embedder initialized")
+    )
+    monkeypatch.setattr(mail_index, "SQLiteStore", lambda *a: pytest.fail("SQLite initialized"))
+    monkeypatch.setattr(
+        mail_index, "MailQdrantStore", lambda *a: pytest.fail("vectors initialized")
+    )
+    with pytest.raises(ValueError, match="collides"):
+        build(str(root), str(db), qdrant_url="http://example.invalid", collection=collection)
+    assert not db.exists()
+
+
+def test_mail_qdrant_waits_for_applied_mutations(monkeypatch):
+    from memory_store.mail_index import MailQdrantStore
+    from memory_store.qdrant import QdrantStore
+
+    calls = []
+    monkeypatch.setattr(
+        QdrantStore,
+        "_request",
+        lambda self, method, path, payload=None: calls.append((method, path)) or {},
+    )
+    vectors = MailQdrantStore("http://example.invalid", "mail-private-fixture")
+    vectors.upsert([("chunk", "one.md", "Heading", "Terms", 1)], lambda _: [0.1] * 128)
+    vectors.delete_file("one.md")
+    assert calls == [
+        ("GET", "/collections/mail-private-fixture"),
+        ("PUT", "/collections/mail-private-fixture/points?wait=true"),
+        ("POST", "/collections/mail-private-fixture/points/delete?wait=true"),
+    ]

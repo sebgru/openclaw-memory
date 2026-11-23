@@ -59,11 +59,16 @@ PYTHONPATH=src python -m memory_store.mail_index \
 Use the existing embedding environment (`EMBEDDING_URL`, `EMBEDDING_MODEL`); use the
 same model/dimension for build and search. Omit Qdrant only for a lexical smoke test;
 such a run cannot establish bilingual semantic acceptance. Use a new SQLite database
-when adding vectors or changing embedding model; unchanged files are not re-embedded.
+when changing the vector destination or embedding model. A durable SQLite queue
+records changed paths and deletion tombstones in the same transaction as file state.
+Builds retry pending work (including after lexical-only runs); remote operations wait
+for completion before acknowledgement. A failed/partial upsert is replaced on retry.
+Mail search rejects vector hits absent from current SQLite chunks, including replaced
+content and removed messages, even if remote deletion is unavailable.
 No live service or collection is an appropriate dry-run destination.
 
 After explicit rollout approval, configure `MAIL_SQLITE_PATH`, `MAIL_ACCESS_TOKEN` and
-optionally `MAIL_QDRANT_COLLECTION` (must start `mail-`), plus the existing Qdrant URL.
+optionally `MAIL_QDRANT_COLLECTION` (must be `mail-private` or start `mail-private-`, and differ from every other configured scope), plus the existing Qdrant URL.
 The token must differ from other capabilities and must be held only by a trusted private
 owner-chat adapter. The adapter must verify channel, owner identity and private-chat
 context before sending `X-Mail-Access`; this token is not itself chat authentication.

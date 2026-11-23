@@ -115,7 +115,7 @@ if MAIL_PATH and os.path.realpath(MAIL_PATH) in {
 mail_store = SQLiteStore(MAIL_PATH, DIM) if MAIL_PATH and MAIL_TOKEN else None
 MAIL_COLLECTION = os.getenv("MAIL_QDRANT_COLLECTION", "mail-private")
 if mail_store and (
-    not MAIL_COLLECTION.startswith("mail-")
+    not (MAIL_COLLECTION == "mail-private" or MAIL_COLLECTION.startswith("mail-private-"))
     or MAIL_COLLECTION
     in {
         os.getenv("QDRANT_COLLECTION", "memory"),
@@ -123,7 +123,7 @@ if mail_store and (
         os.getenv("DOCUMENTS_QDRANT_COLLECTION", "documents"),
     }
 ):
-    raise ValueError("mail collection must use a separate mail- namespace")
+    raise ValueError("mail collection must use a separate mail-private namespace")
 mail_vector_store = (
     QdrantStore(os.getenv("QDRANT_URL"), MAIL_COLLECTION, DIM)
     if mail_store and os.getenv("QDRANT_URL")
@@ -213,6 +213,37 @@ PROMPT_SOURCE_QUOTAS = {
 _search_state = threading.local()
 
 
+def _current_mail_vectors(selected_store, hits):
+    """Reject removed/replaced chunks, even while remote deletion is failing.
+
+    Qdrant payloads are not authoritative. Require the current SQLite chunk's
+    point identity and payload, and return SQLite content rather than remote text.
+    """
+    current = []
+    with selected_store._read_connection() as db:
+        for hit in hits:
+            rows = db.execute(
+                "SELECT c.* FROM chunks c JOIN files f ON f.path=c.path WHERE c.path=?",
+                (hit.get("path"),),
+            )
+            for row in rows:
+                if hit.get("id") == point_id(row["id"]) and all(
+                    hit.get(key) == row[column]
+                    for key, column in (("heading", "heading"), ("text", "body"), ("line", "line"))
+                ):
+                    current.append(
+                        {
+                            **hit,
+                            "path": row["path"],
+                            "heading": row["heading"],
+                            "text": row["body"],
+                            "line": row["line"],
+                        }
+                    )
+                    break
+    return current
+
+
 def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFAULT_VECTOR):
     _search_state.lexical_fallback = False
     rank_fusion = getattr(_search_state, "rank_fusion", False)
@@ -242,6 +273,8 @@ def hybrid_search(query, limit, selected_store=None, selected_vector_store=_DEFA
         logger.warning("semantic search unavailable, falling back to FTS (%s)", type(exc).__name__)
         _search_state.lexical_fallback = True
         semantic = []
+    if selected_store is mail_store:
+        semantic = _current_mail_vectors(selected_store, semantic)
     merged: dict = {}
     max_lexical_evidence = max((max(0.0, row.get("score", 0.0)) for row in lexical), default=0)
     # SQLite rows carry raw chunk IDs while Qdrant hits carry UUID5 point IDs;
