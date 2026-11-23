@@ -37,6 +37,9 @@ test('rejects HTML responses and incomplete deltas without publishing',async()=>
  try {
   await assert.rejects(sync({root,get:graph([record('one',{body:{contentType:'html',content:'<b>not text</b>'}})]),policy}),/text body/);
   assert.equal(fs.existsSync(path.join(root,'current')),false);
+  const incomplete=async url=>url.includes('mailFolders?')?{value:[{id:'inbox',displayName:'Inbox'}]}:{value:[record('one')]};
+  await assert.rejects(sync({root,get:incomplete,policy}),/Incomplete delta response/);
+  assert.equal(fs.existsSync(path.join(root,'current')),false);
  } finally {fs.rmSync(root,{recursive:true});}
 });
 test('all delta pages, no total-change top cap, denied folders and quote-aware forwarding',async()=>{
