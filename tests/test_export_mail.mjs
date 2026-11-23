@@ -81,3 +81,13 @@ test('move tombstone cannot delete a message already seen in its new folder',asy
   assert.equal(state.records.moved.folder,'New folder');
  }finally{fs.rmSync(root,{recursive:true});}
 });
+test('body variants with the same internetMessageId are not silently discarded',async()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'mail-fixture-'));
+ try{
+  const result=await sync({root,get:graph([
+   record('one',{internetMessageId:'<same@example.invalid>',body:{contentType:'text',content:'Warranty seven years'}}),
+   record('two',{internetMessageId:'<same@example.invalid>',body:{contentType:'text',content:'Warranty ten years'}}),
+  ]),policy});
+  assert.equal(result.exported,2);assert.equal(result.duplicates,0);
+ }finally{fs.rmSync(root,{recursive:true});}
+});

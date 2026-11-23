@@ -37,8 +37,8 @@ After a crash, verify no process is active before manually removing a stale lock
 Expired delta cursors fail closed; change policy version to rebuild from Graph.
 
 Graph ID and conversation ID are private state, not searchable text. Files use hashed
-internetMessageId (fallback: normalized subject, sender, date and projected body).
-Duplicate message copies map to one file. Different replies are retained; a whole thread
+internetMessageId plus projected-body digest (fallback: normalized subject, sender, date and projected body).
+Exact message copies map to one file; body variants sharing an internetMessageId are retained. Different replies are retained; a whole thread
 is never collapsed to its newest message. Standard explicit reply quotations are trimmed
 only for reply subjects; forwarded letters remain intact. Ambiguous quote formats are
 kept, favoring recall over aggressive deletion. Per-message results are collapsed after

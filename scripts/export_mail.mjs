@@ -101,7 +101,7 @@ export async function sync({root, get, policy}) {
       const body = /^(?:re|aw|antw)\s*:/i.test(m.subject || '') ? cleanBody(m.body.content) : m.body.content.trim();
       // Do not collapse a conversation: distinct replies carry distinct facts.
       const contentKey = hash(JSON.stringify([oneLine(m.subject).replace(/^(?:(?:re|aw|fw|fwd|wg):\s*)+/ig,''), m.from, m.receivedDateTime, body]));
-      const key = hash(m.internetMessageId ? 'message:'+m.internetMessageId : 'content:'+contentKey);
+      const key = hash(m.internetMessageId ? 'message:'+m.internetMessageId+'\0'+hash(body.replace(/\s+/g,' ').trim()) : 'content:'+contentKey);
       const file = key+'.md';
       aliases[id] = file;
       if (seen.has(key)) {duplicates++; continue;}
