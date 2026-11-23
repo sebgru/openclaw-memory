@@ -56,6 +56,17 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  exporter:
+    name: Mail Exporter (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Run exporter tests
+        run: node --test tests/test_export_mail.mjs
+
   docker:
     name: Docker Build
     runs-on: ubuntu-latest
