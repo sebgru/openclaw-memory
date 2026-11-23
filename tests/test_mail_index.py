@@ -35,9 +35,13 @@ def test_incremental_reconciliation(tmp_path, monkeypatch):
 
 
 def test_missing_and_collision(tmp_path, monkeypatch):
+    from memory_store.mail_index import _build
+
     root = tmp_path / "export"
     with pytest.raises(ValueError, match="completed"):
         build(str(root), str(tmp_path / "mail.db"))
+    with pytest.raises(ValueError, match="completed"):
+        _build(str(root), str(tmp_path / "mail.db"))
     snapshot(root, {})
     with pytest.raises(ValueError, match="distinct"):
         build(str(root), str(tmp_path / "memory.db"))
@@ -192,13 +196,15 @@ def test_mail_lane_failure_provenance_and_message_collapse(tmp_path, monkeypatch
             lambda *a: [
                 {"id": "one", "path": "message.md", "text": "fact one", "line": 1},
                 {"id": "two", "path": "message.md", "text": "fact two", "line": 2},
+                {"id": "three", "path": "missing.md", "text": "fact three", "line": 1},
             ],
         )
         result, warnings, coverage, degraded = server.unified_search_with_coverage(
             "warranty", 3, "mail"
         )
-        assert len(result) == 1
+        assert len(result) == 2
         assert result[0]["mail"]["date"] == "2026-01-01"
+        assert "mail" not in result[1]
         assert warnings and degraded == {"mail": "lexical_fallback"}
         assert coverage["mail"] == "searched"
         with pytest.raises(ValueError):
@@ -527,3 +533,38 @@ def test_mail_qdrant_waits_for_applied_mutations(monkeypatch):
         ("PUT", "/collections/mail-private-fixture/points?wait=true"),
         ("POST", "/collections/mail-private-fixture/points/delete?wait=true"),
     ]
+
+
+def test_mail_startup_validation_and_vector_configuration(tmp_path):
+    import importlib
+    import os
+    from unittest.mock import patch
+
+    from memory_store import server
+
+    base = {
+        "SQLITE_PATH": str(tmp_path / "index.db"),
+        "MAIL_SQLITE_PATH": str(tmp_path / "mail.db"),
+        "MAIL_ACCESS_TOKEN": "synthetic-token",
+        "QDRANT_URL": "http://example.invalid",
+    }
+    try:
+        for overrides, message in [
+            ({"MAIL_SQLITE_PATH": "relative.db"}, "must be absolute"),
+            ({"MAIL_SQLITE_PATH": base["SQLITE_PATH"]}, "must be separate"),
+            ({"MAIL_QDRANT_COLLECTION": "documents"}, "mail-private namespace"),
+            (
+                {"MAIL_QDRANT_COLLECTION": "mail-private", "QDRANT_COLLECTION": "mail-private"},
+                "mail-private namespace",
+            ),
+        ]:
+            with patch.dict(os.environ, {**base, **overrides}):
+                with pytest.raises(ValueError, match=message):
+                    importlib.reload(server)
+        with patch.dict(os.environ, {**base, "MAIL_QDRANT_COLLECTION": "mail-private-fixture"}):
+            module = importlib.reload(server)
+            assert module.mail_store is not None
+            assert module.mail_vector_store.collection == "mail-private-fixture"
+            module.mail_store.close()
+    finally:
+        importlib.reload(server)
